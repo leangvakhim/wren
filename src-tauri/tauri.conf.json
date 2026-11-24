@@ -35,6 +35,10 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "11.0"
+    },
     "shortDescription": "A lightweight desktop GUI for AI coding CLIs"
   }
 }

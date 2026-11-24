@@ -7,4 +7,4 @@ src-tauri/gen/
 # secrets: never commit
 .env
 .env.*
-AGENTS-local
+AGENTS-local*

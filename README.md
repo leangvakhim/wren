@@ -33,6 +33,24 @@ npm run tauri dev      # opens the Wren window, reloads as you edit
 npm run tauri build    # macOS: .app and .dmg in src-tauri/target/release/bundle/
 ```
 
+The Mac build is ad-hoc signed (free, no Apple Developer account). On another
+Mac, the first launch needs System Settings → Privacy & Security → "Open Anyway".
+
+## Release for macOS, Windows and Linux
+
+`.github/workflows/release.yml` builds Wren on GitHub for Apple Silicon and Intel
+Macs, Windows and Linux, and puts the installers on a **draft** GitHub release.
+
+1. Set the new version in `src-tauri/tauri.conf.json` (and `package.json`,
+   `src-tauri/Cargo.toml`).
+2. Commit, then push a matching tag: `git tag v0.1.0 && git push origin v0.1.0`
+   (or run the workflow by hand: GitHub → Actions → release → Run workflow).
+3. When the four builds finish (about 15–25 min), open GitHub → Releases, check
+   the draft and press **Publish release**.
+
+Files: macOS `Wren_<v>_aarch64.dmg` / `Wren_<v>_x64.dmg`, Windows
+`Wren_<v>_x64-setup.exe` / `.msi`, Linux `.AppImage` / `.deb` / `.rpm`.
+
 ## Using Wren
 
 - **1 / 2 / 3 / 4** in the top bar sets how many conversations are shown.

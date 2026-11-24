@@ -1,0 +1,88 @@
+# Builds Wren for macOS (Apple Silicon + Intel), Windows and Linux, and puts
+# the installers on a DRAFT GitHub release. Review the draft, then press
+# "Publish release" on GitHub to make it public.
+#
+# Start it by pushing a version tag that matches tauri.conf.json, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# or run it by hand: GitHub → Actions → "release" → Run workflow.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest' # Apple Silicon Macs (M1 and newer)
+            args: '--target aarch64-apple-darwin'
+          - platform: 'macos-latest' # Intel Macs
+            args: '--target x86_64-apple-darwin'
+          - platform: 'ubuntu-22.04' # .deb, .rpm and .AppImage
+            args: ''
+          - platform: 'windows-latest' # .msi and setup .exe
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Only the Mac runners need the extra targets.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust builds
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux packages
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Install frontend packages
+        run: npm ci
+
+      - name: Build and upload to the draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__ # replaced with the version in tauri.conf.json
+          releaseName: 'Wren v__VERSION__'
+          releaseBody: |
+            Download the file for your computer:
+            - **macOS (Apple Silicon, M1 and newer):** `Wren_*_aarch64.dmg`
+            - **macOS (Intel):** `Wren_*_x64.dmg`
+            - **Windows:** `Wren_*_x64-setup.exe` (or the `.msi`)
+            - **Linux:** `.AppImage` (any distro), `.deb` (Debian/Ubuntu) or `.rpm` (Fedora)
+
+            Wren uses the official AI CLIs. Install the ones you want first:
+            Claude Code (`claude`), Codex (`codex`) and/or Antigravity (`agy`).
+
+            **macOS first launch:** this build isn't notarized by Apple. If macOS
+            says it can't be opened, go to System Settings → Privacy & Security
+            and click "Open Anyway" (once).
+            **Windows first launch:** if SmartScreen appears, click
+            "More info" → "Run anyway".
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
