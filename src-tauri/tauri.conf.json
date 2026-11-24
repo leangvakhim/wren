@@ -44,7 +44,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "PASTE_WREN_PUBLIC_KEY_HERE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI0OEYwMkE2MjIyQ0JEMjYKUldRbXZTd2lwZ0tQdFBWZmFOcU12YWNTYy82Rjl5b3RndUhVNXJ3bEtIdjlCbzVZdHJYc2dzY1UK",
       "endpoints": ["https://github.com/leangvakhim/wren/releases/latest/download/latest.json"],
       "windows": { "installMode": "passive" }
     }
