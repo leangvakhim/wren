@@ -1,0 +1,223 @@
+# claude.md — Wren project memory
+
+This file is Claude's working memory for the Wren project. Read it first at the
+start of every session, and update the **Progress log** and **Status** at the end
+of every session.
+
+## Ground rules (from the user)
+
+- `AGENTS-local.md` is the user's task list. **Never edit it** except to append
+  the word `done` to a task once it is fully completed.
+- A task marked `suspend` must be skipped until the user removes the mark.
+- **Ask the user to confirm understanding before implementing** any task.
+- Keep this file (`claude.md`) updated with progress so the next session can
+  continue.
+
+## Project summary
+
+**Wren** is a lightweight, cross-platform (macOS, Windows, Linux) desktop GUI
+that hosts the official AI coding CLIs side by side:
+
+- Claude Code (`claude`)
+- OpenAI Codex CLI (`codex`)
+- Google Antigravity CLI (`agy`). It replaced Gemini CLI, which Google retired
+  in June 2026.
+
+## Decisions so far
+
+| Topic | Decision |
+|---|---|
+| Framework | **Tauri 2**: Rust backend plus a web-tech UI (TypeScript + Svelte, tentative). It is a desktop app, not a website. |
+| Why Tauri | Small binary, low RAM, Rust memory safety, a capability allowlist for the IPC between the UI and Rust |
+| How CLIs run | (Superseded, see User decisions #4.) The Rust backend spawns the **unmodified** CLI in its headless JSON mode, one per pane, with `cwd` set to the chosen folder; the UI renders chat bubbles. |
+| Max panes | 4 (layouts for 1, 2, 3 and 4 panes) |
+| Name | **Wren** (app id e.g. `com.<user>.wren`) |
+| Logo | **Concept A, "Perch"**: a wren with a cocked tail on a `_` cursor, block-cursor eye. Accent `#E39B4B`, ink `#17181C`, light ground `#F6F6F3`, wordmark in Space Grotesk 600 lowercase. Design canvas: https://claude.ai/artifact/Y22Dj3euz3gkJK1VWtwvr7 |
+| Secrets | API keys go in the OS keychain (`keyring` crate). Never in `.env` or plain config. The CLIs keep their own login tokens. |
+| Privacy defaults | Set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` for Claude panes. Find the equivalent telemetry opt-outs for codex and agy (agy has telemetry under `/config`). |
+
+## Policy constraints to respect
+
+- Anthropic does not allow third-party apps to offer Claude.ai login or to
+  collect, store or intermediate Claude.ai credentials or session tokens.
+  Sign-in must complete through Anthropic's own flow, which means Wren runs the
+  official `claude` login and never touches the token.
+- Pro/Max limits assume ordinary individual use. **Automatic rotation between
+  accounts to get around limits is not something Wren should implement**
+  (pending the user's decision on AGENTS-local task 3).
+- On Claude subscriptions, `claude -p` / Agent SDK usage draws from a separate
+  monthly "Agent SDK credit". Interactive PTY use counts as normal use.
+- Prompts and code must reach each vendor's servers for the model to work.
+  Wren can only cut *non-essential* traffic and keep *its own* data local.
+
+## User decisions (2026-11-23)
+
+1. **Limit hit (task 3):** NO automatic rotation. When a pane hits its limit,
+   Wren shows it and offers a **manual account picker** for that pane. The
+   user chooses the account; Wren never switches by itself.
+2. **Privacy (tasks 11-12):** **Privacy settings only.** Turn off telemetry,
+   error reporting and feedback in every CLI; keep all of Wren's data in local
+   app storage; no Wren server; show a guide to each vendor's training
+   opt-out. No local-model support.
+3. **Sign-in (task 2):** "Add account" creates an isolated profile folder and
+   runs that CLI's OWN login flow. Accounts can be saved as "pending" and
+   signed in later. Wren never reads or stores tokens.
+4. **Pane style:** **Chat bubbles.** Wren drives each CLI in its
+   headless/JSON mode and renders the events as a chat. Note: on Claude
+   subscriptions, `claude -p` draws from the separate Agent SDK credit
+   (the user was told).
+5. **Cost (task 7):** show tokens + USD for every account; subscription costs
+   are labelled "API-price estimate".
+6. **`\new`:** starts a fresh conversation in the ACTIVE pane, keeping the
+   same CLI, account and folder (backslash on purpose).
+7. **Plan:** confirmed. macOS first, then Windows/Linux via GitHub Actions.
+   Start with Phase 1.
+
+## Multiple accounts per provider (user clarification, 2026-11-23)
+
+The user wants **many accounts of each kind**, not one per provider. For
+example: 3 Claude Code accounts, 2 Codex accounts and 2 Antigravity accounts.
+Phase 2 must model accounts as a list (provider, nickname, email shown after
+sign-in, status: pending / signed-in / limit-hit), and each pane picks one
+account. The limit-hit picker lists all accounts of that provider. Wren
+still never switches by itself.
+
+How each CLI isolates an account (research, 2026-11-23; verify on the Mac):
+- **Claude Code:** `CLAUDE_CONFIG_DIR=<wren-data>/accounts/claude/<id>`. Each
+  dir has its own login, settings and history. On macOS the Keychain entry is
+  per config-dir path (some older reports say a single shared entry, so
+  verify). Several Claude accounts can run at the same time in different panes.
+- **Codex:** `CODEX_HOME=<wren-data>/accounts/codex/<id>`. The login is stored
+  in `auth.json` under CODEX_HOME (or the OS keyring if configured). Several
+  can run at the same time.
+- **Antigravity CLI:** NO per-directory account isolation. The login is in the
+  OS keyring (macOS Keychain service "gemini", account "antigravity"), one
+  Google login per machine. Third-party tools override HOME and clear the
+  Keychain on switch, which is fragile. Google staff said manual switching is
+  fine but switching to bypass quota can trigger abuse flags.
+  -> **DECIDED (user):** Wren saves many Antigravity accounts, but only ONE is
+  signed in at a time. Switching signs out and opens Google's own sign-in for
+  the chosen account. Panes using Antigravity all share the active account.
+
+## Phase 2 decisions (user, 2026-11-23 evening)
+
+- **Sign-in from Wren:** click Sign in on an account and Wren runs the CLI's OWN
+  sign-in in a PTY, shows the sign-in **link + Copy button** and a **live
+  terminal view** (xterm.js) so a code can be pasted back if the CLI asks.
+- **Folder badge:** a chip **inside the message box** (folder icon + name + caret,
+  click to change), like Claude Desktop.
+- **Default folder:** macOS `~/Desktop`; Windows/Linux the **home folder**. New
+  panes (cwd empty) start there automatically.
+- **Phase 2 built now**, including multiple accounts per AI.
+- AGENTS-local.md task 13 (website wren.leangvakhim.com) is marked
+  **(suspend)**. Do NOT work on it until the user removes the mark.
+
+## Phases (confirmed)
+
+1. App shell: Perch icon, light/dark/system theme, 1-4 pane layout with chat
+   bubbles, folder picker, `\new`, Claude adapter.
+2. Accounts and profiles (+ manual account picker on limit).
+3. Model and effort selection per provider.
+4. Usage and cost panel.
+5. Privacy hardening and limit handling.
+
+## Architecture (as built)
+
+- `src-tauri/src/events.rs`: `UiEvent`, the single event format the UI understands.
+- `src-tauri/src/providers.rs`: per-CLI launch args, env and JSON parsers:
+  - Claude: `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode <m>` (Full = `--dangerously-skip-permissions`). Long-lived; stdin message `{"type":"user","message":{"role":"user","content":[{"type":"text","text":...}]}}`. Resume = `--resume <session_id>`.
+  - Antigravity: `agy --input-format stream-json --output-format stream-json --mode <default|plan|auto>` (Full = `--dangerously-skip-permissions`). Long-lived; stdin `{"event":"user","message":{"content":...}}`. Resume = `--conversation <id>`. Usage is cumulative per session, so the parser computes the difference.
+  - Codex: (superseded 2026-11-24, see "Manual / Auto approvals") was one process per turn with `codex exec --json`; now `codex app-server` JSON-RPC, one process per conversation.
+  - Privacy env for Claude: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = 1.
+- `src-tauri/src/sessions.rs`: `Manager` with at most 4 panes. Handles spawn, stdin writer task, stdout parser task, stderr log task and exit watcher. A generation counter ignores stale processes. Unix uses a process group so Stop kills child commands (killpg); Windows uses `taskkill /T` and CREATE_NO_WINDOW. `search_path()` builds PATH from the login shell plus common install directories, because GUI apps on macOS don't inherit the shell PATH.
+- `src-tauri/src/lib.rs`: commands `open_pane`, `update_pane`, `send_message`, `new_conversation`, `stop_pane`, `close_pane`, `detect_clis`. Kills all CLIs on exit.
+- UI: `src/routes/+page.svelte` (top bar: 1-4 layout and Light/Dark/System; state in localStorage `wren.state.v1`), `src/lib/Pane.svelte` (chat, tool cards, `\new`, Stop, New, folder picker, permission, usage footer), `src/lib/markdown.ts` (marked + DOMPurify; strips img/style/iframe...), `src/lib/theme.ts`, `src/lib/Logo.svelte` (Perch).
+- Security: strict CSP in tauri.conf.json; capabilities = core:default, core:window:allow-set-theme, dialog:allow-open only; no web fonts or remote loads; links in answers are blocked from navigating.
+- Icons generated from `app-icon.svg` (Perch) with `npx tauri icon app-icon.png`.
+
+- `src-tauri/src/accounts.rs` (Phase 2): `AccountStore` in `<app_data_dir>/accounts.json`. Built-in Default account per AI (`default-claude`, `default-codex`, `default-agy` = the CLI's normal login, can't be removed, CAN be renamed; the name persists). Added accounts get a private folder `<app_data_dir>/accounts/<bin>/<id>` (0700) used as CLAUDE_CONFIG_DIR / CODEX_HOME. Antigravity: `active_antigravity` = the one signed in; `env_for` refuses inactive ones. Status: `claude auth status --json` (`loggedIn`, `email`; verified against real Claude Code 2.1.330) and `codex login status` (exit 0 = signed in; verified "Not logged in" + exit 1 on codex-cli 0.171.0). Remove = CLI sign-out (`claude auth logout` / `codex logout`) then delete the folder.
+- `src-tauri/src/login.rs` (Phase 2): `LoginManager` runs `claude auth login` / `codex login [--device-auth]` / `agy` in a portable-pty PTY with the account env, and streams base64 output + found links (`UrlFinder`: ANSI-stripped, https regex, de-duplicated) to the UI. Input/resize/cancel commands. Real `claude auth login` output was captured and is a unit test (short URL `https://claude.ai/oauth/authorize?...`, plus an OSC 8 hyperlink).
+- Panes: `PaneConfig.accountId`; `open_pane`/`update_pane` resolve the account env, and a pane whose account can't be used refuses to send with the reason. A limit-hit regex in Pane.svelte shows a banner with a MANUAL account picker ("Switch (new conversation)"); never automatic.
+- UI (Phase 2): `src/lib/accounts.svelte.ts` (shared reactive accounts), `AccountsDialog.svelte` (native <dialog>; add/sign in/check/rename/remove per AI), `LoginSheet.svelte` (link + Copy + xterm + Cancel/Restart/Done; Codex "one-time code" checkbox), folder chip in the Pane composer, `default_folder` command.
+- Verified with real CLIs in the build container: `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode default` is accepted and the parser handled real events. `codex exec --json --skip-git-repo-check --sandbox read-only resume <id> <prompt>` parses fine. CODEX_HOME must exist (Wren creates it). codex exec reads stdin when not a TTY (Wren gives it /dev/null).
+
+- Phase 3-5 (2026-11-23 late): `models.rs` (Claude aliases fable/opus/sonnet/haiku with efforts low..max; Codex live catalog from `codex debug models` (visibility=list, supported_reasoning_levels), falling back to `--bundled`; Antigravity `agy models` parsed line by line, with a fallback list). Flags: claude `--model/--effort`; codex `-m` + `-c model_reasoning_effort="x"` + privacy `-c analytics.enabled=false -c feedback.enabled=false`; agy `--model/--effort`. `Manager::set_model` keeps the conversation (kills the process; the next send resumes the session id). `Manager::resume` opens a saved conversation with its session id.
+- `history.rs`: conversations stored ONLY locally in `<app_data_dir>/conversations/<id>.json` + `index.json` (0700, atomic writes, id validation). UI saves (debounced) after the user message, session start, turn end and stop.
+- Usage: Codex/agy `input_tokens` now EXCLUDE cached tokens (split in the parser). `src/lib/pricing.ts` has the USD/MTok table (OpenAI gpt-6.x/5.6/5.5, Gemini 4 Carbon/Argon/Hydrogen with Dec-1 price change, Gemini 3.8 Flash with Jan-1 change, Claude 5.5 via agy). Claude uses the CLI's own `total_cost_usd`. Footer labels everything an "API-price estimate"; unknown models show "cost unknown".
+- UI: `ModelPicker.svelte` (star chip in the composer; popover with models, a custom id field and effort chips), `Sidebar.svelte` (left, toggled by the panel icon at top-left; grouped by folder with collapse; open in the ACTIVE pane; rename/delete with inline confirm), `PrivacyDialog.svelte` (data folder path, what's auto-disabled, training opt-out guide, "Open Antigravity settings" runs agy in the terminal sheet with `/config` instructions), `LoginSheet` `purpose="settings"`.
+- Verified in the container: real claude 2.1.330 accepts `--model opus --effort high`; real codex 0.171.0 accepts `-m gpt-6.2-sol -c model_reasoning_effort="high" -c analytics.enabled=false -c feedback.enabled=false`; `codex debug models` lists gpt-6.2-sol/astra, gpt-6.1-sol/terra, gpt-6-sol/luna/astra, gpt-5.6-*, gpt-5.5.
+
+- Task 3 + 16 (2026-11-23 night):
+  - `src/lib/limits.ts`: `isLimitMessage`, `parseResetTime` (epoch after a pipe, ISO, "in 2 hours 13 minutes"/"in 4h 30m", "resets 3pm"/"at 3:45 PM"/"resets 15:00" giving the next occurrence in local time), `buildRecap` (last ~8000 chars of user/assistant text + the last request). Tests: `node --experimental-strip-types src/lib/limits.test.ts`.
+  - `src/lib/settings.svelte.ts` + `SettingsDialog.svelte` (gear icon): `onLimit` = 'switch' (default) | 'wait' | 'off', `fallbackOrder`, `waitIfNoOther` (default true). Saved in localStorage `wren.settings.v1`.
+  - Pane: a limit text seen during a turn is handled when the turn ends (`pendingLimit`). 'switch' moves to the next AI in fallbackOrder that is installed and has a usable account (Default first). It runs `update_pane` (new conversation), starts a new saved conversation titled "old title → AI", and sends the recap. Shown as "(Recap of the conversation with X)" + the last request. 'wait' shows a countdown banner and re-sends the last message on the same account/session at reset + 1 min (30 min if no time is found), with Continue now / Cancel. Timers only run while Wren is open. NEVER rotates between accounts of the same AI (user agreed).
+  - Usage records: each `turn_done` adds `{t, provider, accountId, model, input (uncached + cache writes), cached, output, cost|null}` to the conversation's `usage` array. `History::usage_records()` (Rust, tested) flattens all saved conversations; old saves without `usage` contribute one record from their totals. Command `usage_records`.
+  - `UsageDialog.svelte` (Usage button): 7/30/90/All; tiles (estimated cost, tokens read incl. cache, tokens written, answers/conversations); stacked bar per day by AI (cost or tokens, one axis, 2px gaps, rounded top, hover tooltip, legend, table view); breakdowns by AI/account/model/folder with share bars; "How to read this". Series colors validated with the dataviz validator: light #2a78d6/#eb6834/#1baf7a (aqua <3:1, so the table view gives relief), dark #3987e5/#d95926/#199e70 (CSS vars `--series-claude/codex/antigravity`).
+
+- Task 17 + 18 (2026-11-24):
+  - **Plan limits per account (task 17)**: `src-tauri/src/limits.rs` (+tests). Claude Code: `rate_limit_event` lines in stream-json (`rate_limit_info.unifiedWindows.five_hour/seven_day` utilization 0-1, resetsAt epoch s) become `UiEvent::PlanLimits`; on demand Wren spawns `claude -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence` and sends the control request `{"type":"control_request","request_id":"wren-usage","request":{"subtype":"get_usage","skip_behaviors":true}}` (answer: `rate_limits.five_hour/seven_day/seven_day_opus/sonnet/model_scoped`, utilization 0-100, resets_at ISO; no prompt is sent, costs nothing). Codex: `codex app-server -c analytics.enabled=false -c feedback.enabled=false` JSON-RPC: `initialize`, `initialized`, `account/rateLimits/read` (primary/secondary `usedPercent`, `windowDurationMins` 300/10080, `resetsAt`, `planType`) and `account/usage/read` (`dailyUsageBuckets[{startDate,tokens}]`). Antigravity: NO way outside agy's interactive `/usage` (user chose: Wren's own count + an "Open /usage" button that runs agy in the terminal sheet, `LoginSheet purpose="usage"` with a "Type /usage" button). Command `plan_limits(account_id)`. Verified against real claude 2.1.331 + codex 0.172.0 (not signed in) with `WREN_REAL_CLI=1 cargo test real_clis`.
+  - UI: `planLimits.svelte.ts` (per-account store in localStorage `wren.limits.v1`, refresh with min age, merge of live events, `usedNow` = 0 after reset time, levels 80 warn / 95 critical, session-only `dismissedWarnings`), `LimitBars.svelte` (meters: AI series color, then `--status-warning` #fab219 / `--status-critical` #d03b3b, always with ⚠/⛔ + words). Shown in: Accounts window (bars per account, Refresh, plan name; refresh on open if older than 2 min), pane footer (5h/week mini meters; click = refresh), pane warning banners at 80%/95% (dismissable), Usage window ("Plan limits right now" cards + "Daily usage per account" table for the last 7 days from Wren's records, plus OpenAI's own daily count for Codex). Codex limits are re-read after each turn (at most once a minute); Claude only if no event came during the turn.
+  - **Study / Deep research (task 18)**: `providers::Mode` (`study` | `research`) in `PaneConfig.mode` and saved conversations. Claude: Study = `--settings {"outputStyle":"Learning"}` (built-in Learning style) + `--append-system-prompt STUDY_PROMPT`; Research = `--append-system-prompt RESEARCH_PROMPT` + `--allowedTools "WebSearch WebFetch Agent"` + `--effort high` if none chosen. Codex: `-c developer_instructions=<JSON string>` (verified with `codex debug prompt-input`: becomes a developer message) and for Research `-c web_search="live"` + `model_reasoning_effort="high"` if none chosen. Antigravity: no system-prompt flag known, so the instructions are wrapped around each message (`<wren_mode>…</wren_mode>`); the chat shows only the user's text. `set_mode` keeps the conversation (like `set_model`). UI: `ModeMenu.svelte` ("+" button in the composer, menu like Claude Desktop, active-mode chip with ×). Deep research: after each successful turn Wren saves the final answer with `save_report` to `<project>/research/YYYY-MM-DD-HHMM-<title>.md` (`reports.rs`, never overwrites, tested); the prompt tells the AI not to write the report file itself.
+
+- Full model names (2026-11-24, user request): `ModelInfo` now has `description`, `resolved` (exact model behind an alias) and `is_default`. Claude Code's list comes live from the CLI: control request `{"type":"control_request","request_id":"wren-models","request":{"subtype":"list_models"}}` in stream-json mode (no prompt sent; works signed out; verified on 2.1.331). Each entry has `value` (alias), `resolvedModel`, `displayName`, `description` ("Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok"); Wren shows "Opus 5.5" + the description (prices dropped) + `claude-opus-5-5`. **User chose: keep sending the alias (follow the newest model); the label updates by itself.** The static fallback list (CLI missing) is versioned too. Codex: `display_name` + `description` from `codex debug models`, sorted by `priority` (first = default, shown as "usually …"). Antigravity: `agy models` ids are made readable by `pretty_model_name` ("gemini-3.1-pro-high" -> "Gemini 3.1 Pro (High)"; an effort in the id means no separate effort chips); a second column becomes the description. Picker: name, description, exact id; Default row says "currently Opus 5.5" (Claude) / "usually GPT-6.2-Sol" (Codex); chip shows e.g. "Opus 5.5 (default) · High"; pane header maps the CLI-reported id to the full name; pricing uses the resolved id. 29 Rust tests.
+
+- Limit layout (2026-11-24, user request with a screenshot): `LimitBars.svelte` now shows ONE row per account with TWO columns, "Current session" (five_hour) | "This week" (seven_day), each with title, "N% used", a thin bar and "Resets at 12:10 PM" (today) / "Resets Tuesday 7:00 AM" (within 7 days) / date. User chose: used in the Usage window ("Plan limits right now" is now a bordered list: account + plan + checked time on the left, the two columns on the right) AND the Accounts window; extra limits (Weekly (Fable), Codex Spark, ...) are hidden in the row's hover text with "+N more limits (hover)" and a warning icon if one is at 80%+.
+
+- Stuck-turn fixes (2026-11-24, user report: "hi" showed a Bash card then "Working…" forever). Cause analysis: macOS is case-insensitive, so Claude Code loads this `claude.md` as CLAUDE.md and its first step is `cat AGENTS-local.md` (that's the card). Real claude 2.1.331 + a fake Anthropic API (ANTHROPIC_BASE_URL) showed the turn ends normally with Wren's flags, so the likely cause was long silent thinking (Wren ignored thinking events) or a control request Wren never answered. User chose all three fixes: (1) progress: tool cards show running… / ✓ done / ✗ failed, `UiEvent::Thinking` (Claude `content_block_start` thinking/redacted_thinking; Codex `reasoning` item.started) shows "Thinking…", and a "Working… m:ss" timer; (2) never wait on Wren: Claude gets `--permission-prompts none` (verified: anything needing approval is refused at once with a message to the model), and the parser answers every Claude `control_request` immediately (`can_use_tool` -> success/deny, anything else -> error) through `Parser::take_replies()` written to stdin by the reader task, plus a `UiEvent::Notice` shown as an amber note; (3) per-turn Details log: `UiEvent::Raw` for every non-streaming stdout line (truncated to 1500 chars) + stderr, shown live while busy and kept under the finished turn as a `details` message (memory only, max 60k chars, not saved in history). Test `real_claude_tool_turn_ends` runs the real CLI through `Manager` when `WREN_FAKE_API` is set. 31 Rust tests.
+
+- Manual / Auto approvals (2026-11-24, user request; user chose: Allow / Allow for this chat / Deny, rebuild Codex so it asks, Antigravity = refuse + Allow & retry; default Manual). `Permission` is now `manual | auto | plan | full` (serde aliases `ask`->manual, `edits`->auto; UI `normalizePermission` migrates saved panes/conversations). Changing permission keeps the conversation (`set_permission`, like set_model).
+  - Claude Code: Manual = `--permission-mode default --permission-prompt-tool stdio` (Claude sends `control_request` `can_use_tool` with tool_name, input, description, permission_suggestions); Plan = `plan` + stdio (ExitPlanMode becomes a "Plan ready: Start / Keep planning" card with the plan as markdown); Auto = `--permission-mode auto --permission-prompts none` (classifier); Full = `--dangerously-skip-permissions --permission-prompts none`. Replies (`link.rs::reply`): allow = `{"behavior":"allow","updatedInput":input}`; allow for this chat = same + `updatedPermissions` = Claude's addRules suggestions with destination forced to "session" (never saved to project settings); deny = `{"behavior":"deny","message":...}`. AskUserQuestion is auto-denied with "ask in plain text". Any other control request gets an error reply + Notice. Verified with the real CLI + a fake Anthropic API: asked each time in default/manual; "Allow for chat" asked once for two identical commands; file created.
+  - Codex rebuilt on `codex app-server` (only Codex interface with approvals): one long-lived process per conversation; startup = initialize, initialized, then `thread/start` or `thread/resume` (id "thread") with cwd + approvalPolicy/sandbox/approvalsReviewer from `codex_policy` (Manual untrusted/read-only/user, Auto on-request/workspace-write/auto_review, Plan never/read-only, Full never/danger-full-access); model/effort/mode are `-c` flags. Messages typed before the thread answer are queued in `LinkState.queued` and sent by the parser when ready (`turn/start` id "turn-N", input `[{type:text,text,text_elements:[]}]`). If resume fails, the parser starts a new thread (Notice). Events: item/agentMessage/delta, item/started|completed (commandExecution, fileChange, mcpToolCall, webSearch, reasoning->Thinking), thread/tokenUsage/updated (cumulative; per-turn = difference), turn/completed, error, account/rateLimits/updated (live plan limits). Server requests item/commandExecution/requestApproval and item/fileChange/requestApproval become cards (answer `{"decision":"accept"|"acceptForSession"|"decline"}`); "Allow for this chat" only if `availableDecisions` contains acceptForSession (real 0.172 sometimes offers only accept / acceptWithExecpolicyAmendment (a PERMANENT rule, never used) / cancel); other requests get a JSON-RPC error + Notice. Verified with the real codex 0.172.0 against a fake OpenAI Responses API (CODEX_HOME config.toml model_provider "fake", tool `exec_command`): Manual Deny (declined, nothing ran), Manual Allow (file created, per-turn usage right), Auto (no card, file created). Model list and plan limits still use their own short processes.
+  - Antigravity: Manual = `--mode default` (request-review; headless auto-denies). The UI detects refusals (tool errors / errors / stderr / turn errors matching "cannot prompt|auto-denied|needs approval|permission denied|…") and shows one card per turn with **Allow & retry** (set_permission auto, re-send the last message, then back to the pane's permission after that turn) / **Keep refused**. Auto = `--mode auto`, Plan = `--mode plan`, Full = skip permissions.
+  - Shared state `link.rs` (`LinkState`: ready, queued, pending approvals, request counter) is new for every process, so cards from a stopped/restarted process expire ("No longer waiting"). Waiting cards are saved as expired. While a card waits the pane shows "Waiting for your approval… m:ss". Commands `answer_approval(pane, id, decision)`, `set_permission(pane, permission)`. Tests: link replies, parser cards (Claude + Codex incl. real request shapes), fake app-server end-to-end (queue, approval, resume), and real-CLI tests `real_claude_manual_approval` (WREN_FAKE_API2), `real_codex_approvals` (WREN_FAKE_CODEX_HOME). 36 Rust tests.
+
+- Cowork-style steps (2026-11-24, user request with Cowork screenshot + a pecking-pigeon GIF; user chose: collapse when done, remove the raw Details log, rotating bird words). Pane.svelte groups each turn: user message, then ONE step group (tool calls + the AI's notes that are followed by more tool work), then everything else in order (final answer, approval cards, errors, notes). Header while working: `PeckingWren` (new `PeckingWren.svelte`: the Perch bird tips forward 44deg around its feet to peck at crumbs, double peck, 1.6s loop; still under prefers-reduced-motion) + rotating word (Pecking, Foraging, Figuring, Nesting, Preening, Scouting, Hopping, Fluttering, Gathering twigs; every 3s; "Thinking" / "Waiting for your approval" override) + m:ss + chevron, open while live. When the turn ends it collapses to "Worked for 3m 33s ›" (`durationMs` saved on the user message). Rows: "Ran a command", "Read a file <name>", "Edited a file <name>", "Searched files", "Searched the web", "Read a web page", "Ran a sub-agent", "Updated tasks", "Used <tool>" (`stepLabel`), each expandable to the command and output; failed rows red; "running" while live. The conversation column and the message box are max 64rem (5xl, changed from 3xl at the user's request), centered. Removed: separate tool cards, the Details raw log and `UiEvent::Raw` (old saved 'details' messages are ignored).
+
+- Image attachments (2026-11-24, AGENTS-local task "attach photos by paste or picker"; user chose: copies in Wren's private folder; also kept the whole-bird pecking animation and approved marking the Manual/Auto and wren tasks done). `attachments.rs`: every image is copied into `<app_data>/attachments` (0700), type checked by magic bytes (PNG/JPEG/GIF/WebP only, max 5 MB, max 10 per message); `check()` only allows files inside that folder (canonicalized), so a message can't make Wren read other files. Commands: `attach_image_data` (clipboard / drag & drop, base64 or data URL), `attach_image_file` (file picker path, copied), `attachment_preview` (thumbnails of saved conversations), `send_message(pane, text, images?)`. Per CLI (`Provider::stdin_message(text, images, …)`): Claude = image blocks `{"type":"image","source":{"type":"base64",...}}` before the text; Codex = `{"type":"localImage","path"}` inputs; Antigravity = text + "Attached image(s): @<path> …" (no documented headless image input; UNVERIFIED on the Mac). Verified with fake APIs: real claude 2.1.331 forwards the image block, real codex 0.172.0 turns localImage into an `input_image` data URL. UI: thumbnails strip with × in the message box, paste (⌘V) on the textarea, drag & drop on the message box (`dragDropEnabled: false` in tauri.conf.json so the webview gets drops), "Add images…" first in the + menu (dialog with image filters), images shown in the user's bubble (click = lightbox), sending with images and no text allowed; Continue / Allow & retry re-send the images too. 39 Rust tests.
+
+- Any-file attachments (2026-11-24, user clarification: "not only images: csv, excel, zip… every file that's not harmful"; user chose: allow scripts, 100 MB per file). `attachments.rs` rewritten: copies go to `<app_data>/attachments/<id>/<original name>` (name cleaned: no folders/control chars, ≤120 chars); refused = programs/installers by CONTENT (ELF, Mach-O, fat/Java CAFEBABE, PE "MZ", xar) and by NAME (exe, msi, dll, app, dmg, pkg, so, deb, rpm, apk, ipa, jar, iso, lnk, …); scripts allowed (Wren never runs attachments); empty and >100 MB refused; max 10 per message; folders must be zipped. `outgoing()` decides how to send: images ≤5 MB inline, PDFs ≤30 MB inline for Claude, everything else by path. Claude: image blocks, `document` blocks for PDFs (verified with the real CLI + fake API), other files listed in the text "[Attached files (copies saved on this computer; open them with your tools): - <path> (size, mime)]"; Claude is started with `--add-dir <attachments folder>` (Manager.set_attach_dir at setup) so reading them needs no approval in Manual (verified: without it Claude asked for Read, with it the CSV was read at once). Codex: images as localImage, other files (incl. PDFs) listed by path (its sandbox reads anywhere). Antigravity: `@<path>` for every file (unverified). Commands: `attach_bytes` (raw IPC body + `x-file-name` header, URL-encoded; no base64 for big files), `attach_file` (picker path), `attachment_preview`, `send_message(pane, text, files?)`. UI: "Add files…" (no filter) in the + menu, paste/drop any file, image thumbnails + file chips (type tag, name, size) in the message box and in sent bubbles; `Msg.files` (older saves' `images` still render). 41 Rust tests.
+
+- Close pane (2026-11-24, AGENTS-local task "cross button on each pane"; user chose: × on every pane, hidden when only 1 pane; ask "Stop & close?" if the pane is working). `+page.svelte` keeps `order` (on-screen position -> pane slot 0-3, saved in `wren.state.v1`); panes are keyed by slot, so `paneId`/config/session stay with the pane when another one closes. `closePane(pos)` moves the slot to the back of `order` and lowers `layout` (2 -> 1, 3 -> 2, 4 -> 3). Pane.svelte: `closable` + `onclose` props, × in the header, inline confirm banner while busy / waiting for approval / waiting to continue; closing persists the conversation (stays in the sidebar).
+- Claude plan limits investigation (2026-11-24, user report: Usage shows "Claude didn't return plan limits right now" and no 5h/week meters for a signed-in Claude account). Read the real claude 2.1.331 code: `get_usage` sets `rate_limits_available = isClaudeAiSubscriber && scopes include "user:profile"`, then GETs `/api/oauth/usage` (5 s timeout, 429-prone); on failure it falls back to in-process rate-limit headers (empty in Wren's fresh process) or a cached copy in the config. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` does NOT gate this read. Live `rate_limit_event` carries `unifiedWindows` (from anthropic-ratelimit-unified-* headers) and is emitted when a window's rounded % / reset / status moves. Wren's current message merges two causes (missing user:profile scope vs. usage service not answering). Added `scripts/check-claude-limits.sh` (read-only; same flags/env as Wren; prints the raw get_usage answer + Claude's debug notes for the Default account and every Wren account folder). Result (user's Mac, Claude Code 2.1.310, Pro): `get_usage` = `{"subscription_type":"pro","rate_limits_available":true,"rate_limits":null}`; debug log shows `fetchUtilization: GET /api/oauth/usage (attempt 1)` and nothing after (silent failure/timeout; `claude update` also timed out on that connection). A real turn DOES emit `rate_limit_event` with `unifiedWindows` (five_hour 0.11, seven_day 0.18; test `claude_real_event_2_1_310`). ROOT CAUSE in Wren: `refreshLimits` restored the entry captured BEFORE the slow read, so a failed read wiped numbers a reply had delivered meanwhile (Claude only re-sends when the rounded % changes). FIX (user chose all 4): (1) on failure keep the CURRENT entry's numbers; (2) `AccountLimits.from` = 'reply' | 'read', `sourceText()` ("from your last reply, 3 min ago"); Usage + Accounts show the numbers with "⚠ latest read failed" (hover / text) instead of hiding them; reads are skipped while numbers (even with an error) are newer than minAge; (3) `parse_claude_usage` now says: not a subscription / lacks profile permission (sign in again) / `CLAUDE_NO_ANSWER` (usage service didn't answer in 5 s); (4) `limits::read` retries Claude once after 3 s on `CLAUDE_NO_ANSWER`. Scripts `scripts/check-claude-limits.sh` and `scripts/check-claude-live-limits.sh` (sends one tiny Haiku message) kept for future checks. The user's two added Claude accounts were never signed in (left as is, user's choice).
+
+## Status
+
+**All AGENTS-local tasks are marked (done) except #13 (suspend).**
+- #17 (subscription usage per account: 5h cap and daily) and #18 (Study + Deep research) were built on 2026-11-24 after the user confirmed: Antigravity = local count + Open /usage button; show limits in Accounts, pane footer, Usage window, and warnings at 80/95%; Study = tutor; Deep research = chat + report saved in the project folder.
+- #13 (website wren.leangvakhim.com): (suspend). Do nothing until the user removes the mark.
+Checks (2026-11-24): svelte-check 0/0, vite build, clippy 0 warnings, cargo test 26 passing (+ real-CLI test), limits tests passing. UI screenshot-checked with a mocked backend (light/dark: pane meters + warnings, + menu, Accounts bars, Usage plan-limit cards + daily table, a simulated research turn saving its report).
+
+Still unverified on the Mac: real plan-limit numbers from signed-in accounts (shapes come from the CLIs' own schemas), real usage-limit message texts, Antigravity end to end (incl. whether agy's web search needs approval in Read only), Keychain separation per CLAUDE_CONFIG_DIR.
+
+## Next steps
+
+1. Get the user's Mac test results and fix problems (agy is the least verified).
+2. Keep `src/lib/pricing.ts` up to date (prices change; Gemini 4 Carbon/Argon change on 2026-12-01, Gemini 3.8 Flash on 2027-01-01).
+3. Ideas not requested yet: approval prompts in the UI, syntax highlighting, search in the sidebar, GitHub Actions builds for Windows/Linux, code signing.
+4. Task 13 (website wren.leangvakhim.com) only when un-suspended.
+
+## Progress log
+
+- 2026-11-23: Chose Tauri 2 + Rust, the name "Wren" and logo concept A
+  ("Perch"). Read AGENTS-local.md (12 tasks). Created this file. Sent the
+  clarifying questions to the user.
+- 2026-11-23: User answered all 7 questions (see User decisions). Started
+  Phase 1.
+- 2026-11-23: Researched headless modes (claude stream-json, codex exec --json, agy stream-json). Built Phase 1 (Tauri 2 + Svelte 5): 3 CLI adapters, 1-4 panes, chat bubbles, themes, `\new`, Stop/resume, folder picker, Perch icons. Tests pass in the container. Files written to this folder (.vscode skipped: remote tools can't write there).
+- 2026-11-23: User clarified: multiple accounts PER provider. Researched isolation (CLAUDE_CONFIG_DIR, CODEX_HOME, agy has none). Recorded in "Multiple accounts per provider".
+- 2026-11-23: Decided: Antigravity = one active account, switch by re-login. Phase 2 waits for the Phase 1 test results.
+- 2026-11-23: User asked for sign-in links, a folder chip and default folder (Desktop on macOS, home elsewhere). Confirmed details via questions, then built Phase 2 (multi-account per AI, sign-in PTY with link + Copy + terminal, account picker, manual limit switcher, folder chip, default folder). Verified flags against real claude 2.1.330 and codex 0.171.0 in the container. Copied 18 files. Noticed task 13 (suspend) in AGENTS-local.md.
+- 2026-11-23: User asked for Rename on every account incl. the built-in "Default" of all 3 AIs. Rename button now shown for all accounts (Enter saves, Escape cancels, max 40 chars); Remove still hidden for Default ones. Test added (rename persists).
+- 2026-11-23 (late): User asked to finish AGENTS-local point by point. New tasks 14 (sidebar) and 15 (model picker) appeared. Asked 4 questions (open in active pane; full chat saved locally; picker in the message box; mark 11-12 done and leave 3). Built model/effort picker, USD estimates, local history + sidebar, privacy flags + Privacy window. Marked 1,2,4,6,8,7,9,11,12,14,15 (done). Left 3 unmarked and 13 suspended.
+- 2026-11-23 (night): User asked to finish the unmarked tasks. #3 was re-worded and #16 (usage analytics) added. Asked: user chose "switch to another AI" + "wait and continue", a Usage window, Wren data only, and mark #3 done. Built limits.ts (+tests), Settings dialog, auto-switch with recap, wait countdown, per-turn usage records, usage_records command (+test), Usage window. Marked #3 and #16 (done). #13 still suspended.
+- 2026-11-24: User asked to implement the remaining unmarked tasks (#17 plan usage per account, #18 Study / Deep research). Researched the real CLIs (claude 2.1.331 `rate_limit_event` + `get_usage`; codex 0.172.0 app-server `account/rateLimits/read` + `account/usage/read`; Antigravity has only interactive /usage). Asked 4 questions, user chose the recommended options and all four places to show limits. Built limits.rs, reports.rs, Mode flags, planLimits store, LimitBars, ModeMenu, Accounts/Pane/Usage changes. Marked #17 and #18 (done).
+- 2026-11-24: User asked for full model names with versions ("Opus 5.5", not "Opus") for every AI. Found Claude Code's `list_models` control request; asked one question (alias vs exact version; user chose follow newest). Built it for Claude, Codex and Antigravity; screenshot-checked the picker.
+- 2026-11-24: User sent a screenshot of the limit style they want (Current session / This week). Asked where + how to show extra limits; built the one-row-per-account, two-column layout in Usage and Accounts.
+- 2026-11-24: User reported a pane stuck on "Working…" after a Bash card. Reproduced with the real CLI + a fake API; asked which fixes; built progress display, never-wait handling and the per-turn Details log.
+- 2026-11-24: User asked for Claude Desktop-style Manual / Auto with Manual as default. Tested what each CLI supports (Claude stdio permission prompts; Codex approvals only via app-server; agy can't prompt headless). Asked 3 questions. Built Manual/Auto/Plan/Full, approval cards, Codex app-server rewrite, Antigravity Allow & retry; verified with the real Claude Code and Codex against fake APIs.
+- 2026-11-24: User asked for Cowork-style step groups, a 3xl centered column and a pecking-wren loader. Asked 3 questions; built PeckingWren + step groups; removed the Details log.
+- 2026-11-24: User asked to implement the remaining AGENTS-local tasks. Asked 3 questions; marked Manual/Auto and the wren loader (done); built image attachments (paste, picker, drag & drop) for all three CLIs and marked that task (done). #13 still suspended.
+- 2026-11-24: User clarified attachments mean any non-harmful file. Asked 2 questions (scripts allowed, 100 MB). Built any-file attachments for all three CLIs; verified Claude PDF documents and --add-dir reads with the real CLI.
+- 2026-11-24: User asked to implement the remaining AGENTS-local task (× on each pane). Asked 3 questions (all recommended answers). Built stable pane slots + × + "Stop & close?" banner; svelte-check 0/0, vite build OK. Marked the task (done). #13 still suspended.
+- 2026-11-24: User reported no 5h/weekly limits for a linked Claude account. Investigated Claude Code 2.1.331's get_usage / rate_limit_event; privacy env is not the cause. Added scripts/check-claude-limits.sh and asked the user to run it.
+- 2026-11-24: Ran both diagnostics with the user: usage endpoint times out on their connection, but replies carry the 5h/weekly numbers. Found the race in refreshLimits that wiped them. Asked to confirm; built the 4 fixes (keep numbers, show source, clearer reasons, one retry). svelte-check 0/0, vite build, cargo test 43 passing, clippy clean.
