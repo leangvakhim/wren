@@ -13,8 +13,8 @@
   import { settings } from './settings.svelte';
   import { buildRecap, formatWait, isLimitMessage, parseResetTime } from './limits';
   import { renderMarkdown } from './markdown';
-  import { accountLabel, accountsFor, findAccount, isUsable } from './accounts.svelte';
-  import { MODES, PROVIDERS, PERMISSIONS, defaultAccountId, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
+  import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
+  import { MODES, PROVIDERS, PERMISSIONS, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
 
   let {
     paneId,
@@ -169,6 +169,8 @@
   let sessionId: string | null = null;
   let listEl: HTMLDivElement | undefined = $state();
   let opened = $state(false);
+  /** The account the CLI process was last started with (the pane's menu can change later, e.g. when the first account is added). */
+  let appliedAccount: string | null = null;
   let limitHit = $state(false);
   let switchTo = $state('');
 
@@ -455,6 +457,7 @@
       config.effort = '';
       try {
         await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+        appliedAccount = config.accountId;
       } catch (e) {
         push({ role: 'error', text: String(e) });
         return false;
@@ -699,6 +702,7 @@
     if (!opened) return;
     try {
       await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+      appliedAccount = config.accountId;
       resetView();
       push({ role: 'info', text: `${note}. New conversation.` });
     } catch (e) {
@@ -775,7 +779,7 @@
   }
 
   function changeProvider() {
-    config.accountId = defaultAccountId(config.provider);
+    config.accountId = bestAccountId(config.provider);
     config.model = '';
     config.effort = '';
     applyConfig(`Switched to ${PROVIDERS[config.provider].label}`);
@@ -804,6 +808,7 @@
       config.effort = conv.effort ?? '';
       config.mode = conv.mode ?? null;
       await invoke('resume_conversation', { paneId, config: $state.snapshot(config), sessionId: conv.sessionId });
+      appliedAccount = config.accountId;
       busy = false;
       streamingId = null;
       limitHit = false;
@@ -857,6 +862,16 @@
     if (!config.cwd) {
       push({ role: 'error', text: 'Choose a project folder for this pane first.' });
       return;
+    }
+    // The pane got an account since its CLI started (e.g. the first one was just added).
+    if (opened && config.accountId !== appliedAccount) {
+      if (messages.length) await applyConfig(`Account: ${account?.name ?? 'none'}`);
+      else {
+        try {
+          await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+          appliedAccount = config.accountId;
+        } catch {}
+      }
     }
     input = '';
     const files: SentFile[] = attachments.map(({ preview: _p, ...f }) => f);
@@ -914,6 +929,7 @@
     channel.onmessage = handle;
     try {
       await invoke('open_pane', { paneId, config: $state.snapshot(config), onEvent: channel });
+      appliedAccount = config.accountId;
       opened = true;
       nowTimer = setInterval(() => (now = Date.now()), 60_000);
     } catch (e) {
@@ -949,6 +965,8 @@
     <select id={`${paneId}-account`} class="account" bind:value={config.accountId} disabled={busy} onchange={changeAccount} title="Which account this conversation uses">
       {#each accountsFor(config.provider) as a (a.id)}
         <option value={a.id}>{accountLabel(a)}</option>
+      {:else}
+        <option value="">No account yet</option>
       {/each}
     </select>
 
@@ -993,6 +1011,11 @@
   {#if missing}
     <p class="banner">
       The <code>{PROVIDERS[config.provider].bin}</code> CLI wasn't found. Install it, then restart Wren.
+    </p>
+  {:else if !account}
+    <p class="banner">
+      There's no {providerLabel} account in Wren yet.
+      <button class="linklike" onclick={onopenaccounts}>Open Accounts to add one</button>
     </p>
   {:else if account && !accountOk}
     <p class="banner">

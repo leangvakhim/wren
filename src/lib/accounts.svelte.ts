@@ -35,6 +35,13 @@ export const accountsFor = (p: Provider) => accounts.list.filter((a) => a.provid
 
 export const findAccount = (id: string) => accounts.list.find((a) => a.id === id);
 
+/** The account a pane should use for this AI: a usable one (this computer's login first), or '' if Wren has none. */
+export function bestAccountId(p: Provider): string {
+  const list = accountsFor(p);
+  const usable = list.filter((a) => isUsable(a));
+  return (usable.find((a) => a.is_default) ?? usable[0] ?? list[0])?.id ?? '';
+}
+
 /** Whether this account can be used right now. */
 export function isUsable(a: Account | undefined): boolean {
   if (!a) return false;

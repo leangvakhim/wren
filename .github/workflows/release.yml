@@ -1,5 +1,6 @@
 # Builds Wren for macOS (Apple Silicon + Intel), Windows and Linux, and puts
-# the installers on a DRAFT GitHub release. Review the draft, then press
+# the installers (plus latest.json and signatures for in-app updates) on a
+# DRAFT GitHub release. Review the draft, then press
 # "Publish release" on GitHub to make it public.
 #
 # Start it by pushing a version tag that matches tauri.conf.json, e.g.:
@@ -65,6 +66,10 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update files so installed copies of Wren accept them
+          # (repo Settings → Secrets and variables → Actions).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__ # replaced with the version in tauri.conf.json
           releaseName: 'Wren v__VERSION__'

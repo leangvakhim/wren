@@ -216,4 +216,4 @@ export const PERMISSIONS: { value: Permission; label: string; hint: string }[] =
 
 export const defaultAccountId = (p: Provider) => `default-${PROVIDERS[p].bin}`;
 
-export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: 'default-claude', model: '', effort: '', mode: null };
+export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: '', model: '', effort: '', mode: null };

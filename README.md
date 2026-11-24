@@ -30,6 +30,9 @@ npm run tauri dev      # opens the Wren window, reloads as you edit
 ## Build an installer
 
 ```bash
+# Builds also make signed update files, so they need your update key (see "Updates" below):
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/wren.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<your key password>"
 npm run tauri build    # macOS: .app and .dmg in src-tauri/target/release/bundle/
 ```
 
@@ -50,6 +53,26 @@ Macs, Windows and Linux, and puts the installers on a **draft** GitHub release.
 
 Files: macOS `Wren_<v>_aarch64.dmg` / `Wren_<v>_x64.dmg`, Windows
 `Wren_<v>_x64-setup.exe` / `.msi`, Linux `.AppImage` / `.deb` / `.rpm`.
+
+## Updates
+
+Installed copies check the latest **published** GitHub release (`latest.json`) at
+start and every 6 hours. When a newer version exists, an **Update available**
+button appears in the top bar: one click downloads, installs and restarts Wren
+(accounts and conversations stay). Settings → Updates → Check for updates does it
+by hand.
+
+Updates are signed. One-time setup (already done for this repo):
+
+1. `npm run tauri signer generate -- -w ~/.tauri/wren.key`. Keep `wren.key` private
+   and backed up: without it, installed copies can't be updated anymore.
+2. Put the text of `~/.tauri/wren.key.pub` in `src-tauri/tauri.conf.json` →
+   `plugins.updater.pubkey`.
+3. GitHub repo → Settings → Secrets and variables → Actions: add
+   `TAURI_SIGNING_PRIVATE_KEY` (text of `wren.key`) and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+Copies of 0.1.0 have no updater: install 0.1.1 by hand once.
 
 ## Using Wren
 

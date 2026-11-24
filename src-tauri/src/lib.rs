@@ -25,8 +25,9 @@ use providers::{Mode, Permission, Provider};
 use sessions::{Manager, PaneConfig};
 
 fn account_env(store: &AccountStore, cfg: &PaneConfig) -> Result<Vec<(String, String)>, String> {
-    let id = cfg.account_id.clone().unwrap_or_else(|| accounts::default_id(cfg.provider));
-    let acc = store.get(&id)?;
+    let no_account = || format!("No {} account in Wren yet. Open Accounts to add one.", cfg.provider.label());
+    let id = cfg.account_id.clone().filter(|s| !s.is_empty()).ok_or_else(no_account)?;
+    let acc = store.get(&id).map_err(|_| no_account())?;
     if acc.provider != cfg.provider {
         return Err("That account belongs to a different AI.".into());
     }
@@ -267,8 +268,12 @@ fn list_accounts(store: State<'_, AccountStore>) -> AccountsView {
 }
 
 #[tauri::command]
-fn add_account(store: State<'_, AccountStore>, provider: Provider, name: String) -> Result<Account, String> {
-    store.add(provider, &name)
+fn add_account(store: State<'_, AccountStore>, provider: Provider, name: String, existing: Option<bool>) -> Result<Account, String> {
+    if existing == Some(true) {
+        store.add_existing(provider, &name)
+    } else {
+        store.add(provider, &name)
+    }
 }
 
 #[tauri::command]
@@ -276,13 +281,43 @@ fn rename_account(store: State<'_, AccountStore>, id: String, name: String) -> R
     store.rename(&id, &name)
 }
 
+/// "Reset Wren": deletes everything Wren keeps on this computer (accounts list,
+/// conversations, attachments) and restarts Wren. Accounts Wren created are
+/// signed out first so their CLI logins (e.g. macOS Keychain items) go too.
+/// This computer's own CLI logins, Antigravity's login and the user's project
+/// files (e.g. research reports) are never touched.
+#[tauri::command]
+async fn reset_wren(app: tauri::AppHandle) -> Result<(), String> {
+    app.state::<Manager>().kill_all();
+    app.state::<LoginManager>().cancel_all();
+    let sign_outs: Vec<(Provider, Vec<(String, String)>)> = {
+        let store = app.state::<AccountStore>();
+        store
+            .added()
+            .into_iter()
+            .filter(|a| store.dir_for(a).is_some_and(|d| d.exists()))
+            .filter_map(|a| store.env_for(&a.id).ok().map(|env| (a.provider, env)))
+            .collect()
+    };
+    for (provider, env) in sign_outs {
+        let _ = accounts::sign_out(provider, &env).await;
+    }
+    let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Only ever Wren's own folder (named after the app id).
+    if data.file_name().and_then(|n| n.to_str()) != Some(app.config().identifier.as_str()) {
+        return Err(format!("Refusing to delete an unexpected folder: {}", data.display()));
+    }
+    if data.exists() {
+        std::fs::remove_dir_all(&data).map_err(|e| format!("Could not delete Wren's data: {e}"))?;
+    }
+    app.restart()
+}
+
 /// Signs the account out in its CLI (clears the stored login), then removes it.
 #[tauri::command]
 async fn remove_account(store: State<'_, AccountStore>, id: String) -> Result<(), String> {
     let acc = store.get(&id)?;
-    if acc.is_default {
-        return Err("The Default account can't be removed.".into());
-    }
+    // The computer's own login (is_default) has no folder: only the label goes.
     if let Some(dir) = store.dir_for(&acc)
         && dir.exists() {
             let env = store.env_for(&id).unwrap_or_default();
@@ -356,9 +391,13 @@ fn cancel_login(logins: State<'_, LoginManager>, login_id: String) {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .manage(Manager::default())
         .manage(LoginManager::default())
         .setup(|app| {
+            // In-app updates: checks the latest GitHub release (signed with the owner's key).
+            #[cfg(desktop)]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             let data = app.path().app_data_dir()?;
             app.manage(AccountStore::load(&data));
             app.manage(History::load(&data));
@@ -403,7 +442,8 @@ pub fn run() {
             start_login,
             login_input,
             login_resize,
-            cancel_login
+            cancel_login,
+            reset_wren
         ])
         .build(tauri::generate_context!())
         .expect("error while building Wren");

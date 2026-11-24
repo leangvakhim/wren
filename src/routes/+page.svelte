@@ -9,9 +9,10 @@
   import UsageDialog from '$lib/UsageDialog.svelte';
   import Sidebar from '$lib/Sidebar.svelte';
   import { loadHistory } from '$lib/history.svelte';
-  import { accounts, checkAll, loadAccounts } from '$lib/accounts.svelte';
+  import { accounts, bestAccountId, checkAll, loadAccounts } from '$lib/accounts.svelte';
   import { applyTheme, type Theme } from '$lib/theme';
-  import { DEFAULT_CONFIG, defaultAccountId, normalizePermission, type PaneConfig, type Provider } from '$lib/types';
+  import { installUpdate, startUpdateChecks, updater } from '$lib/updater.svelte';
+  import { DEFAULT_CONFIG, normalizePermission, type PaneConfig, type Provider } from '$lib/types';
 
   // Everything Wren remembers lives in this computer's local app storage.
   const STORE = 'wren.state.v1';
@@ -32,8 +33,8 @@
     try {
       const s = JSON.parse(localStorage.getItem(STORE) ?? 'null');
       if (s && Array.isArray(s.configs) && s.configs.length === 4) {
-        // older saves have no account: use each AI's Default account
-        s.configs = s.configs.map((c: PaneConfig) => ({ ...DEFAULT_CONFIG, ...c, permission: normalizePermission(c.permission), accountId: c.accountId || defaultAccountId(c.provider) }));
+        // older saves may have no account: one is picked once accounts load
+        s.configs = s.configs.map((c: PaneConfig) => ({ ...DEFAULT_CONFIG, ...c, permission: normalizePermission(c.permission), accountId: c.accountId ?? '' }));
         if (!isOrder(s.order)) s.order = [0, 1, 2, 3];
         return { ...fallback, ...s };
       }
@@ -89,12 +90,13 @@
     layout -= 1;
   }
 
-  // A pane whose account was removed falls back to that AI's Default account.
+  // A pane without an account (or whose account was removed) uses another
+  // account of that AI, or none until one is added in Accounts.
   $effect(() => {
     if (!accounts.loaded) return;
     for (const c of configs) {
       if (!accounts.list.some((a) => a.id === c.accountId && a.provider === c.provider)) {
-        c.accountId = defaultAccountId(c.provider);
+        c.accountId = bestAccountId(c.provider);
       }
     }
   });
@@ -108,7 +110,12 @@
     ready = true;
     installed = await invoke('detect_clis');
     checkAll(installed);
+    startUpdateChecks();
   });
+
+  // ---- in-app update ----
+  let updDlg: HTMLDialogElement | undefined = $state();
+  const updating = $derived(updater.phase === 'downloading' || updater.phase === 'installing');
 
   const THEMES: { value: Theme; label: string }[] = [
     { value: 'light', label: 'Light' },
@@ -151,6 +158,13 @@
     </div>
 
     <span class="spacer"></span>
+
+    {#if updater.available}
+      <button class="update" onclick={() => updDlg?.showModal()} title={`Wren ${updater.available.version} is available (you have ${updater.current})`}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+        {updating ? (updater.phase === 'installing' ? 'Installing…' : `Updating${updater.percent != null ? ` ${updater.percent}%` : '…'}`) : 'Update available'}
+      </button>
+    {/if}
 
     <button class="ghost" onclick={() => (showUsage = true)}>
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>
@@ -216,6 +230,21 @@
 
 <AccountsDialog bind:open={showAccounts} {installed} />
 
+<dialog class="upd" bind:this={updDlg} aria-labelledby="upd-title">
+  {#if updater.available}
+    <h2 id="upd-title">Update Wren to {updater.available.version}?</h2>
+    <p>You have {updater.current}. Wren downloads the update, installs it and restarts.</p>
+    <p class="muted">Your accounts and conversations stay. Replies still running in a pane are stopped by the restart.</p>
+    {#if updater.phase === 'error'}<p class="err" role="alert">The update didn't work: {updater.error}</p>{/if}
+    <div class="row">
+      <button class="primary" disabled={updating} onclick={installUpdate}>
+        {updater.phase === 'installing' ? 'Installing…' : updater.phase === 'downloading' ? `Downloading${updater.percent != null ? ` ${updater.percent}%` : '…'}` : 'Update and restart'}
+      </button>
+      <button class="ghost" disabled={updating} onclick={() => updDlg?.close()}>Later</button>
+    </div>
+  {/if}
+</dialog>
+
 <style>
   .app { height: 100vh; display: flex; flex-direction: column; }
   .top {
@@ -253,6 +282,23 @@
   .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
   .body { flex: 1; min-height: 0; display: flex; }
   .iconbtn { padding: 4px 7px; }
+  .update {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 0; background: var(--accent-fill); color: #17181c;
+    border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .upd {
+    width: min(420px, calc(100vw - 40px));
+    border: 1px solid var(--border); border-radius: 14px;
+    background: var(--surface); color: var(--text); padding: 18px 20px;
+  }
+  .upd::backdrop { background: rgb(0 0 0 / 0.45); }
+  .upd h2 { margin: 0 0 8px; font-size: 17px; }
+  .upd p { margin: 0 0 8px; font-size: 13px; line-height: 1.5; }
+  .upd .muted { color: var(--muted); }
+  .upd .err { color: var(--danger); }
+  .upd .row { display: flex; gap: 8px; margin-top: 12px; }
+  .upd .primary:disabled { opacity: 0.7; cursor: default; }
   .grid {
     flex: 1;
     min-width: 0;

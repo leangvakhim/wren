@@ -61,6 +61,19 @@
     }
   }
 
+  /** Adds the CLI's login that already exists on this computer (no new sign-in). */
+  async function addExisting(p: Provider) {
+    error = null;
+    try {
+      const a = await invoke<Account>('add_account', { provider: p, name: newName[p].trim() || 'This computer', existing: true });
+      newName[p] = '';
+      await loadAccounts();
+      if (p !== 'antigravity' && installed[p]) await check(a);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function check(a: Account) {
     busyId = a.id;
     error = null;
@@ -137,6 +150,9 @@
             Wren's own count per day is in the Usage window.
           </p>
         {/if}
+        {#if !accountsFor(p).length}
+          <p class="note">No {PROVIDERS[p].label} accounts in Wren yet.</p>
+        {/if}
         <ul>
           {#each accountsFor(p) as a (a.id)}
             {@const st = statusOf(a)}
@@ -162,7 +178,9 @@
                     <button class="ghost" disabled={busyId === a.id || installed[p] === null} onclick={() => check(a)}>Check</button>
                   {/if}
                   <button class="ghost" onclick={() => { renaming = a.id; renameText = a.name; }}>Rename</button>
-                  {#if !a.is_default}
+                  {#if a.is_default}
+                    <button class="ghost danger" disabled={busyId === a.id} onclick={() => remove(a)} title={`Takes it off Wren's list. Your ${PROVIDERS[p].bin} login on this computer stays as it is.`}>Remove</button>
+                  {:else}
                     <button class="ghost danger" disabled={busyId === a.id} onclick={() => remove(a)} title="Signs this account out and removes it">Remove</button>
                   {/if}
                 {/if}
@@ -197,6 +215,15 @@
           <label class="sr" for={`add-${p}`}>New {PROVIDERS[p].label} account name</label>
           <input id={`add-${p}`} placeholder="New account name, e.g. Work" bind:value={newName[p]} maxlength="40" />
           <button class="ghost" type="submit" disabled={!newName[p].trim()}>Add account</button>
+          {#if !accountsFor(p).some((a) => a.is_default)}
+            <button
+              class="ghost"
+              type="button"
+              disabled={installed[p] === null}
+              onclick={() => addExisting(p)}
+              title={`Adds the ${PROVIDERS[p].bin} login you already use in Terminal on this computer (no new sign-in)`}
+            >Use this computer's login</button>
+          {/if}
         </form>
       </section>
     {/each}

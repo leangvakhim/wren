@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { invoke } from '@tauri-apps/api/core';
   import { saveSettings, settings, type OnLimit } from './settings.svelte';
+  import { checkForUpdate, updater } from './updater.svelte';
   import { PROVIDERS, type Provider } from './types';
 
   let { open = $bindable(false), installed }: { open: boolean; installed: Partial<Record<Provider, string | null>> } = $props();
@@ -24,6 +26,25 @@
     },
     { value: 'off', label: 'Do nothing', hint: 'Show a message and let me choose.' },
   ];
+
+  // ---- Reset Wren ----
+  let confirmReset = $state(false);
+  let resetting = $state(false);
+  let resetError = $state<string | null>(null);
+
+  async function resetWren() {
+    resetting = true;
+    resetError = null;
+    try {
+      // Wren's own saved settings in this window (layout, theme, limits, ...).
+      localStorage.clear();
+      sessionStorage.clear();
+      await invoke('reset_wren'); // deletes Wren's data and restarts Wren
+    } catch (e) {
+      resetError = String(e);
+      resetting = false;
+    }
+  }
 
   function move(i: number, d: number) {
     const o = settings.fallbackOrder;
@@ -73,6 +94,47 @@
       getting around their limits. You can still pick another account manually in the pane.
     </p>
   </section>
+
+  <section>
+    <h3>Updates</h3>
+    <div class="row center">
+      <span class="ver">Wren {updater.current || '…'}</span>
+      <button class="ghost" disabled={updater.phase === 'checking' || updater.phase === 'downloading' || updater.phase === 'installing'} onclick={() => checkForUpdate(false)}>
+        {updater.phase === 'checking' ? 'Checking…' : 'Check for updates'}
+      </button>
+      <span class="ver" role="status">
+        {#if updater.available}Version {updater.available.version} is ready: use "Update available" at the top.
+        {:else if updater.phase === 'latest'}You have the latest version.
+        {:else if updater.phase === 'error'}Couldn't check: {updater.error}{/if}
+      </span>
+    </div>
+    <p class="note">Wren checks for a new version when it starts and every 6 hours.</p>
+  </section>
+
+  <section>
+    <h3>Reset Wren</h3>
+    <p class="note first">
+      Start over as a new user on this computer: deletes Wren's accounts list, conversations, attachments and settings,
+      then restarts Wren.
+    </p>
+    {#if !confirmReset}
+      <button class="ghost danger" onclick={() => (confirmReset = true)}>Reset Wren…</button>
+    {:else}
+      <div class="confirm" role="alertdialog" aria-label="Reset Wren?">
+        <p><b>Delete everything Wren keeps on this computer?</b> This can't be undone.</p>
+        <ul>
+          <li>Deleted: all accounts in Wren, all conversations, attachments, usage history and settings.</li>
+          <li>Accounts you added in Wren are signed out first.</li>
+          <li>Kept: the <code>claude</code>, <code>codex</code> and <code>agy</code> logins you use in Terminal, and your project files (including research reports).</li>
+        </ul>
+        {#if resetError}<p class="err" role="alert">{resetError}</p>{/if}
+        <div class="row">
+          <button class="danger solid" disabled={resetting} onclick={resetWren}>{resetting ? 'Resetting…' : 'Delete everything and restart'}</button>
+          <button class="ghost" disabled={resetting} onclick={() => (confirmReset = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+  </section>
 </dialog>
 
 <style>
@@ -99,4 +161,15 @@
   .order li span { display: inline-block; min-width: 230px; }
   .check { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 10px; }
   .note { color: var(--muted); font-size: 12px; margin: 12px 0 0; line-height: 1.5; }
+  .note.first { margin: 0 0 8px; }
+  .danger { color: var(--danger); }
+  .danger.solid { background: var(--danger); color: var(--bg); border: 1px solid var(--danger); border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .danger.solid:disabled { opacity: 0.6; cursor: default; }
+  .confirm { border: 1px solid var(--danger); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .confirm p { margin: 0 0 6px; }
+  .confirm ul { margin: 0 0 10px; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .row { display: flex; gap: 8px; }
+  .row.center { align-items: center; flex-wrap: wrap; }
+  .ver { font-size: 13px; color: var(--muted); }
+  .err { color: var(--danger); font-size: 12px; }
 </style>

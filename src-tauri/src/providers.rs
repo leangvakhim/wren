@@ -113,6 +113,15 @@ impl Provider {
         }
     }
 
+    /// Name shown to people.
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+            Provider::Antigravity => "Antigravity",
+        }
+    }
+
     /// Command-line arguments. `resume` is the CLI's own session id (Claude,
     /// Antigravity; Codex resumes through its startup messages).
     /// Every CLI runs as one long-lived process per conversation and reads

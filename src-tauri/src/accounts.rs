@@ -7,8 +7,11 @@
 //! - Antigravity: no per-folder login exists (one Google login per computer),
 //!   so only one Antigravity account is "active" (signed in) at a time.
 //!
-//! Every AI also has a built-in "Default" account that uses the CLI's normal
-//! login (the one you created in a terminal).
+//! A fresh Wren has NO accounts. For each AI the user can add the CLI's normal
+//! login on this computer (the one made in a terminal) as an account
+//! (`is_default`, id `default-<bin>`), or add new accounts with their own
+//! private login folder. Removing an `is_default` account only takes it off
+//! Wren's list; the CLI's own login is never touched.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -20,7 +23,6 @@ use serde_json::Value;
 
 use crate::providers::Provider;
 
-pub const ALL_PROVIDERS: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::Antigravity];
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -77,27 +79,10 @@ impl AccountStore {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        store.version = 1;
-        // Built-in default account for each AI, always first.
-        for (i, p) in ALL_PROVIDERS.into_iter().enumerate() {
-            let id = default_id(p);
-            if !store.accounts.iter().any(|a| a.id == id) {
-                store.accounts.insert(
-                    i.min(store.accounts.len()),
-                    Account {
-                        id,
-                        provider: p,
-                        name: "Default".into(),
-                        status: AccountStatus::Unknown,
-                        email: None,
-                        is_default: true,
-                    },
-                );
-            }
-        }
-        let s = Self { file, root, inner: Mutex::new(store) };
-        let _ = s.save();
-        s
+        // Version 1 always listed a Default account per AI; those saved
+        // entries are kept as they are. New stores start empty.
+        store.version = 2;
+        Self { file, root, inner: Mutex::new(store) }
     }
 
     fn save(&self) -> Result<(), String> {
@@ -118,7 +103,17 @@ impl AccountStore {
 
     pub fn get(&self, id: &str) -> Result<Account, String> {
         let g = self.inner.lock().map_err(|e| e.to_string())?;
-        g.accounts.iter().find(|a| a.id == id).cloned().ok_or_else(|| "Unknown account".into())
+        g.accounts
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+            .ok_or_else(|| "This account isn't in Wren. Open Accounts to add one.".into())
+    }
+
+    /// Wren-added accounts (with their own login folder), for sign-out before a reset.
+    pub fn added(&self) -> Vec<Account> {
+        let g = self.inner.lock().expect("accounts lock");
+        g.accounts.iter().filter(|a| !a.is_default).cloned().collect()
     }
 
     pub fn add(&self, provider: Provider, name: &str) -> Result<Account, String> {
@@ -139,6 +134,34 @@ impl AccountStore {
         Ok(acc)
     }
 
+    /// Adds the CLI's normal login on this computer (no private folder) as an account.
+    pub fn add_existing(&self, provider: Provider, name: &str) -> Result<Account, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 40 {
+            return Err("Give the account a name (up to 40 characters).".into());
+        }
+        let id = default_id(provider);
+        let acc = Account {
+            id: id.clone(),
+            provider,
+            name: name.to_string(),
+            status: AccountStatus::Unknown,
+            email: None,
+            is_default: true,
+        };
+        {
+            let mut g = self.inner.lock().map_err(|e| e.to_string())?;
+            if g.accounts.iter().any(|a| a.id == id) {
+                return Err("This computer's login is already in Wren.".into());
+            }
+            // Keep it first among this AI's accounts.
+            let at = g.accounts.iter().position(|a| a.provider == provider).unwrap_or(g.accounts.len());
+            g.accounts.insert(at, acc.clone());
+        }
+        self.save()?;
+        Ok(acc)
+    }
+
     pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 40 {
@@ -153,12 +176,10 @@ impl AccountStore {
     }
 
     /// Removes the label and its private folder. Call `sign_out` first so the
-    /// CLI clears its own login (e.g. the macOS Keychain item).
+    /// CLI clears its own login (e.g. the macOS Keychain item). For the
+    /// computer's own login (`is_default`) only the label goes.
     pub fn remove(&self, id: &str) -> Result<(), String> {
         let acc = self.get(id)?;
-        if acc.is_default {
-            return Err("The Default account can't be removed.".into());
-        }
         if let Some(dir) = self.dir_for(&acc)
             && dir.starts_with(&self.root) && dir.exists() {
                 std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -361,13 +382,17 @@ mod tests {
     }
 
     #[test]
-    fn defaults_add_persist_env_remove() {
+    fn starts_empty_add_existing_persist_env_remove() {
         let d = tmp();
         let s = AccountStore::load(&d);
-        let v = s.view();
-        assert_eq!(v.accounts.len(), 3);
-        assert!(v.accounts.iter().all(|a| a.is_default));
+        assert!(s.view().accounts.is_empty(), "a fresh Wren has no accounts");
+        assert!(s.get("default-claude").is_err());
+        let me = s.add_existing(Provider::Claude, "Default").unwrap();
+        assert!(me.is_default);
+        assert!(s.add_existing(Provider::Claude, "Again").is_err());
         assert!(s.env_for("default-claude").unwrap().is_empty());
+        s.add_existing(Provider::Codex, "Default").unwrap();
+        s.add_existing(Provider::Antigravity, "Default").unwrap();
 
         let c1 = s.add(Provider::Claude, "Work").unwrap();
         let c2 = s.add(Provider::Claude, "Personal").unwrap();
@@ -383,17 +408,34 @@ mod tests {
         let s2 = AccountStore::load(&d);
         assert_eq!(s2.view().accounts.len(), 6);
 
-        // remove deletes the private folder; default can't be removed
+        // remove deletes the private folder
         let dir = PathBuf::from(&env[0].1);
         s2.remove(&c1.id).unwrap();
         assert!(!dir.exists());
-        assert!(s2.remove("default-claude").is_err());
         assert!(s2.add(Provider::Codex, "   ").is_err());
-        // Default accounts can be renamed, and the name is kept after restart.
+        // The computer's login can be renamed, and the name is kept after restart.
         s2.rename("default-claude", "My Claude").unwrap();
         let s3 = AccountStore::load(&d);
         assert_eq!(s3.get("default-claude").unwrap().name, "My Claude");
         assert!(s3.get("default-claude").unwrap().is_default);
+        // ...and removed from Wren's list (the CLI's login itself is untouched).
+        s3.remove("default-claude").unwrap();
+        assert!(AccountStore::load(&d).get("default-claude").is_err());
+        assert_eq!(s3.added().len(), 2);
+        std::fs::remove_dir_all(d).ok();
+    }
+
+    #[test]
+    fn old_store_keeps_its_default_accounts() {
+        let d = tmp();
+        std::fs::write(
+            d.join("accounts.json"),
+            r#"{"version":1,"accounts":[{"id":"default-claude","provider":"claude","name":"Leang","status":"signed_in","email":"a@b.c","is_default":true}],"active_antigravity":null}"#,
+        )
+        .unwrap();
+        let s = AccountStore::load(&d);
+        assert_eq!(s.view().accounts.len(), 1);
+        assert_eq!(s.get("default-claude").unwrap().name, "Leang");
         std::fs::remove_dir_all(d).ok();
     }
 
