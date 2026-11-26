@@ -154,30 +154,30 @@ impl Provider {
                 ] {
                     push(s);
                 }
-                // Manual / Plan: Claude Code sends Wren a `can_use_tool` request
-                // for anything that needs approval, and the user answers it on a
-                // card. Auto / Full: nothing is asked; anything that would ask is
-                // refused at once instead of waiting.
-                let (pmode, prompts) = match perm {
-                    Permission::Manual => (Some("default"), "stdio"),
-                    Permission::Plan => (Some("plan"), "stdio"),
-                    Permission::Auto => (Some("auto"), "none"),
-                    Permission::Full => (None, "none"),
-                };
-                match pmode {
-                    Some(m) => {
+                // Claude Code sends Wren a `can_use_tool` request for anything
+                // that needs approval. Manual / Plan: the user answers it on a
+                // card. Auto / Full: the parser refuses it at once (see
+                // `Parser::refuse_approvals`), so nothing waits. Every mode uses
+                // stdio because `--permission-prompts none` also removes the
+                // AskUserQuestion tool (checked on 2.1.310), and the question
+                // form must work everywhere.
+                match perm {
+                    Permission::Manual => {
                         push("--permission-mode");
-                        push(m);
+                        push("default");
                     }
-                    None => push("--dangerously-skip-permissions"),
+                    Permission::Plan => {
+                        push("--permission-mode");
+                        push("plan");
+                    }
+                    Permission::Auto => {
+                        push("--permission-mode");
+                        push("auto");
+                    }
+                    Permission::Full => push("--dangerously-skip-permissions"),
                 }
-                if prompts == "stdio" {
-                    push("--permission-prompt-tool");
-                    push("stdio");
-                } else {
-                    push("--permission-prompts");
-                    push("none");
-                }
+                push("--permission-prompt-tool");
+                push("stdio");
                 if let Some(id) = resume {
                     push("--resume");
                     push(id);
@@ -418,6 +418,9 @@ pub struct Parser {
     codex_items: HashMap<String, String>,
     /// Codex: latest cumulative token usage of the thread.
     codex_total: Usage,
+    /// Claude in Auto / Full: approval requests are refused at once instead
+    /// of shown (questions are still shown).
+    refuse_approvals: bool,
 }
 
 impl Parser {
@@ -431,7 +434,14 @@ impl Parser {
             fallback_start,
             codex_items: HashMap::new(),
             codex_total: Usage::default(),
+            refuse_approvals: false,
         }
+    }
+
+    /// Auto / Full never wait for the user: approval requests are refused at once.
+    pub fn for_permission(mut self, perm: Permission) -> Self {
+        self.refuse_approvals = matches!(perm, Permission::Auto | Permission::Full);
+        self
     }
 
     /// Show an approval card and remember what the CLI is waiting for.
@@ -528,6 +538,15 @@ impl Parser {
                             return out;
                         }
                         out.push(self.question(id.clone(), Pending::ClaudeQuestion { request_id: id, input }, questions));
+                        return out;
+                    }
+                    if self.refuse_approvals {
+                        self.replies.push(format!(
+                            "{}\n",
+                            json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+                                "response": {"behavior": "deny", "message": format!(
+                                    "{tool} needs the user's approval, and this conversation runs without approval prompts, so it was refused. Do it another way, or tell the user what you wanted to do.")}}})
+                        ));
                         return out;
                     }
                     let (title, detail) = if tool == "ExitPlanMode" {
@@ -1123,9 +1142,13 @@ mod tests {
         assert!(c.ends_with(&["--resume".into(), "s1".into(), "--model".into(), "opus".into(), "--effort".into(), "xhigh".into()]));
         let auto = Provider::Claude.args(Permission::Auto, None, None, None, None);
         assert!(auto.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "auto"));
-        assert!(auto.windows(2).any(|w| w[0] == "--permission-prompts" && w[1] == "none"), "Auto never waits");
         let full = Provider::Claude.args(Permission::Full, None, None, None, None);
         assert!(full.contains(&"--dangerously-skip-permissions".to_string()));
+        // `--permission-prompts none` would remove the AskUserQuestion tool.
+        for a in [&auto, &full] {
+            assert!(a.windows(2).any(|w| w[0] == "--permission-prompt-tool" && w[1] == "stdio"), "question forms work");
+            assert!(!a.contains(&"--permission-prompts".to_string()));
+        }
         let g = Provider::Antigravity.args(Permission::Manual, None, Some(""), None, None);
         assert!(g.windows(2).any(|w| w[0] == "--mode" && w[1] == "default"));
         assert!(!g.contains(&"--model".to_string()), "empty model = CLI default");
@@ -1170,6 +1193,22 @@ mod tests {
         let (mut p, _) = parser(Provider::Claude);
         let ev = p.parse(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.5,"resetsAt":100}}},"uuid":"u","session_id":"s"}"#);
         assert!(matches!(&ev[0], UiEvent::PlanLimits { limits } if limits.windows[0].used_percent == 50.0));
+    }
+
+    #[test]
+    fn claude_auto_refuses_approvals_but_shows_questions() {
+        let link = crate::link::new_link(true);
+        let mut p = Parser::new(Provider::Claude, Arc::new(Mutex::new(None)), link.clone(), None).for_permission(Permission::Auto);
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf x"}}}"#);
+        assert!(ev.is_empty(), "no card in Auto");
+        let v: Value = serde_json::from_str(p.take_replies()[0].trim()).unwrap();
+        assert_eq!(v["response"]["request_id"], "r1");
+        assert_eq!(v["response"]["response"]["behavior"], "deny");
+        assert!(link.lock().unwrap().pending.is_empty());
+
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","header":"H","multiSelect":false,"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}}}"#);
+        assert!(matches!(&ev[0], UiEvent::Question { id, .. } if id == "r2"));
+        assert!(p.take_replies().is_empty(), "the form waits for the user");
     }
 
     #[test]

@@ -357,7 +357,7 @@ fn spawn(s: &mut Session) -> Result<(), String> {
     s.link = new_link(!provider.needs_handshake());
     let fallback = (provider == Provider::Codex && resume.is_some())
         .then(|| format!("{}\n", codex_thread_request("thread/start", s.cfg.permission, &s.cfg.cwd, None)));
-    let mut parser = Parser::new(provider, s.provider_session.clone(), s.link.clone(), fallback);
+    let mut parser = Parser::new(provider, s.provider_session.clone(), s.link.clone(), fallback).for_permission(s.cfg.permission);
     if let Some(tx) = &stdin_tx {
         for m in provider.startup_messages(s.cfg.permission, &s.cfg.cwd, resume.as_deref()) {
             let _ = tx.send(m);
@@ -675,50 +675,53 @@ mod tests {
     /// (WREN_FAKE_API3=<url>): the form reaches Wren and the answers reach the model.
     fn real_claude_question_form() {
         let Ok(api) = std::env::var("WREN_FAKE_API3") else { return };
-        let dir = std::env::temp_dir().join(format!("wren-q-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let events = Arc::new(Mutex::new(Vec::<String>::new()));
-        let ev2 = events.clone();
-        let channel: Channel<UiEvent> = Channel::new(move |body| {
-            if let InvokeResponseBody::Json(s) = body {
-                ev2.lock().unwrap().push(s);
-            }
-            Ok(())
-        });
-        let m = Manager::default();
-        let cfg = PaneConfig {
-            provider: Provider::Claude,
-            cwd: dir.to_string_lossy().to_string(),
-            permission: Permission::Manual,
-            account_id: None,
-            model: None,
-            effort: None,
-            mode: None,
-        };
-        let env = vec![
-            ("ANTHROPIC_BASE_URL".to_string(), api),
-            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
-            ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
-        ];
-        tauri::async_runtime::block_on(async {
-            m.open("q1".into(), cfg, Ok(env), channel).unwrap();
-            m.send("q1", "ask me".into(), vec![]).unwrap();
-            wait_for(&events, "\"kind\":\"question\"", 1);
-            let id = {
-                let e = events.lock().unwrap();
-                let form = e.iter().find(|s| s.contains("\"kind\":\"question\"")).unwrap().clone();
-                assert!(form.contains("Which framework?") && form.contains("\"multi\":true"), "{form}");
-                serde_json::from_str::<serde_json::Value>(&form).unwrap()["id"].as_str().unwrap().to_string()
+        // Every permission level shows the form (Auto / Full used to lose the tool).
+        for (n, perm) in [Permission::Manual, Permission::Auto, Permission::Full].into_iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!("wren-q-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let events = Arc::new(Mutex::new(Vec::<String>::new()));
+            let ev2 = events.clone();
+            let channel: Channel<UiEvent> = Channel::new(move |body| {
+                if let InvokeResponseBody::Json(s) = body {
+                    ev2.lock().unwrap().push(s);
+                }
+                Ok(())
+            });
+            let m = Manager::default();
+            let cfg = PaneConfig {
+                provider: Provider::Claude,
+                cwd: dir.to_string_lossy().to_string(),
+                permission: perm,
+                account_id: None,
+                model: None,
+                effort: None,
+                mode: None,
             };
-            let mut a = std::collections::HashMap::new();
-            a.insert("Which framework?".to_string(), vec!["Svelte (Recommended)".to_string()]);
-            a.insert("Which extras?".to_string(), vec!["Tests".to_string(), "Lint".to_string()]);
-            m.answer_question("q1", &id, Some(a)).unwrap();
-            wait_for(&events, "turn_done", 1);
-        });
-        let e = events.lock().unwrap().join("\n");
-        assert!(e.contains("GOT: ") && e.contains("Svelte (Recommended)") && e.contains("Tests, Lint"), "{e}");
-        m.kill_all();
+            let env = vec![
+                ("ANTHROPIC_BASE_URL".to_string(), api.clone()),
+                ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+                ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
+            ];
+            tauri::async_runtime::block_on(async {
+                m.open("q1".into(), cfg, Ok(env), channel).unwrap();
+                m.send("q1", "ask me".into(), vec![]).unwrap();
+                wait_for(&events, "\"kind\":\"question\"", 1);
+                let id = {
+                    let e = events.lock().unwrap();
+                    let form = e.iter().find(|s| s.contains("\"kind\":\"question\"")).unwrap().clone();
+                    assert!(form.contains("Which framework?"), "{perm:?}: {form}");
+                    serde_json::from_str::<serde_json::Value>(&form).unwrap()["id"].as_str().unwrap().to_string()
+                };
+                let mut a = std::collections::HashMap::new();
+                a.insert("Which framework?".to_string(), vec!["Svelte (Recommended)".to_string()]);
+                m.answer_question("q1", &id, Some(a)).unwrap();
+                wait_for(&events, "turn_done", 1);
+            });
+            let e = events.lock().unwrap().join("\n");
+            assert!(e.contains("GOT: ") && e.contains("Svelte (Recommended)"), "{perm:?}: {e}");
+            m.kill_all();
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]
