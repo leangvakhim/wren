@@ -39,6 +39,10 @@ pub struct PaneConfig {
     /// Study / Deep research (None = normal).
     #[serde(default)]
     pub mode: Option<Mode>,
+    /// GitHub account that gh and git use in this pane (None = the
+    /// computer's normal setup).
+    #[serde(default)]
+    pub github_account_id: Option<String>,
 }
 
 struct Running {
@@ -221,6 +225,17 @@ impl Manager {
         s.kill();
         s.cfg.model = model;
         s.cfg.effort = effort;
+        Ok(())
+    }
+
+    /// Use another GitHub account WITHOUT losing the conversation (the CLI
+    /// restarts with the new environment and resumes the same session).
+    pub fn set_github(&self, pane_id: &str, github_account_id: Option<String>, env: Result<Vec<(String, String)>, String>) -> Result<(), String> {
+        let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get_mut(pane_id).ok_or("unknown pane")?;
+        s.kill();
+        s.cfg.github_account_id = github_account_id;
+        s.env = env;
         Ok(())
     }
 
@@ -575,6 +590,7 @@ mod tests {
             model: None,
             effort: None,
             mode: None,
+            github_account_id: None,
         };
         let card_id = |events: &Arc<Mutex<Vec<String>>>, n: usize| {
             let e = events.lock().unwrap();
@@ -644,6 +660,7 @@ mod tests {
             model: None,
             effort: None,
             mode: None,
+            github_account_id: None,
         };
         let cfgdir = std::env::temp_dir().join(format!("wren-manual-{}", std::process::id()));
         let env = vec![
@@ -696,6 +713,7 @@ mod tests {
                 model: None,
                 effort: None,
                 mode: None,
+                github_account_id: None,
             };
             let env = vec![
                 ("ANTHROPIC_BASE_URL".to_string(), api.clone()),
@@ -749,6 +767,7 @@ mod tests {
             model: None,
             effort: None,
             mode: None,
+            github_account_id: None,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -800,6 +819,7 @@ mod tests {
             model: None,
             effort: None,
             mode: None,
+            github_account_id: None,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -856,6 +876,7 @@ mod tests {
             model: Some("opus".into()),
             effort: None,
             mode: None,
+            github_account_id: None,
         };
         let env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), api),
@@ -936,6 +957,7 @@ done
             model: None,
             effort: None,
             mode: None,
+            github_account_id: None,
         };
 
         tauri::async_runtime::block_on(async {

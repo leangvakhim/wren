@@ -10,6 +10,7 @@
   import Sidebar from '$lib/Sidebar.svelte';
   import { loadHistory } from '$lib/history.svelte';
   import { accounts, bestAccountId, checkAll, loadAccounts } from '$lib/accounts.svelte';
+  import { checkAllGithub, loadGithub } from '$lib/github.svelte';
   import { applyTheme, type Theme } from '$lib/theme';
   import { installUpdate, startUpdateChecks, updater } from '$lib/updater.svelte';
   import { DEFAULT_CONFIG, normalizePermission, type PaneConfig, type Provider } from '$lib/types';
@@ -106,10 +107,12 @@
     defaultFolder = await invoke<string>('default_folder').catch(() => '');
     for (const c of configs) if (!c.cwd) c.cwd = defaultFolder;
     await loadAccounts().catch(() => {});
+    await loadGithub().catch(() => {});
     await loadHistory().catch(() => {});
     ready = true;
     installed = await invoke('detect_clis');
     checkAll(installed);
+    checkAllGithub();
     startUpdateChecks();
   });
 

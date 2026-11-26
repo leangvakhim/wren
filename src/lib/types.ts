@@ -21,6 +21,8 @@ export interface PaneConfig {
   effort?: string;
   /** Study / Deep research (null = normal). */
   mode?: Mode | null;
+  /** GitHub account gh and git use in this pane ('' = the computer's normal setup). */
+  githubAccountId?: string;
 }
 
 /** Study / Deep research (see the "+" menu in the message box). */
@@ -145,6 +147,16 @@ export interface Account {
   is_default: boolean;
 }
 
+/** A GitHub account, signed in through the GitHub CLI (gh). */
+export interface GithubAccount {
+  id: string;
+  name: string;
+  status: AccountStatus;
+  /** GitHub username, known after sign-in. */
+  login: string | null;
+  is_default: boolean;
+}
+
 export interface AccountsView {
   accounts: Account[];
   active_antigravity: string | null;
@@ -235,4 +247,4 @@ export const PERMISSIONS: { value: Permission; label: string; hint: string }[] =
 
 export const defaultAccountId = (p: Provider) => `default-${PROVIDERS[p].bin}`;
 
-export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: '', model: '', effort: '', mode: null };
+export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: '', model: '', effort: '', mode: null, githubAccountId: '' };

@@ -48,11 +48,28 @@ impl LoginManager {
         rows: u16,
         channel: Channel<LoginEvent>,
     ) -> Result<(), String> {
+        let mut all: Vec<(String, String)> = provider.env().into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        all.extend(env);
+        self.start_program(login_id, provider.binary(), args, all, cols, rows, channel)
+    }
+
+    /// Any sign-in program (e.g. `gh`), found on Wren's search PATH.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_program(
+        &self,
+        login_id: String,
+        program: &str,
+        args: Vec<&'static str>,
+        env: Vec<(String, String)>,
+        cols: u16,
+        rows: u16,
+        channel: Channel<LoginEvent>,
+    ) -> Result<(), String> {
         let path = crate::sessions::search_path();
         let home = home_dir();
-        let bin = which::which_in(provider.binary(), Some(&path), &home)
-            .map_err(|_| format!("The `{}` CLI isn't installed.", provider.binary()))?;
-        self.start_with_bin(login_id, bin, provider, args, env, cols, rows, channel)
+        let bin = which::which_in(program, Some(&path), &home)
+            .map_err(|_| format!("The `{program}` CLI isn't installed."))?;
+        self.start_with_bin(login_id, bin, args, env, cols, rows, channel)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -60,7 +77,6 @@ impl LoginManager {
         &self,
         login_id: String,
         bin: std::path::PathBuf,
-        provider: Provider,
         args: Vec<&'static str>,
         env: Vec<(String, String)>,
         cols: u16,
@@ -79,9 +95,6 @@ impl LoginManager {
         cmd.env("PATH", &path);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        for (k, v) in provider.env() {
-            cmd.env(k, v);
-        }
         for (k, v) in &env {
             cmd.env(k, v);
         }
@@ -252,7 +265,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let m = LoginManager::default();
-        m.start_with_bin("l1".into(), fake.clone(), Provider::Codex, vec!["login"], vec![], 80, 24, ch)
+        m.start_with_bin("l1".into(), fake.clone(), vec!["login"], vec![], 80, 24, ch)
             .unwrap();
         let mut saw_url = false;
         let mut saw_code = false;

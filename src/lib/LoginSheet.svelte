@@ -5,16 +5,24 @@
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
   import { checkAccount, loadAccounts } from './accounts.svelte';
-  import type { Account, LoginEvent } from './types';
+  import { checkGithub } from './github.svelte';
+  import type { Account, GithubAccount, LoginEvent } from './types';
 
   let {
     account,
     onclose,
     purpose = 'signin',
-  }: { account: Account; onclose: () => void; purpose?: 'signin' | 'settings' | 'usage' } = $props();
+  }: { account: Account | GithubAccount; onclose: () => void; purpose?: 'signin' | 'settings' | 'usage' } = $props();
 
   // The sheet is re-created for each account (see {#key} in AccountsDialog).
   const loginId = untrack(() => `login-${account.id}`);
+  /** GitHub accounts sign in with gh (they have no AI provider). */
+  const isGithub = untrack(() => !('provider' in account));
+  /** gh's one-time code, to type on github.com/login/device. */
+  let code = $state<string | null>(null);
+  let codeCopied = $state(false);
+  let outText = '';
+  const decoder = new TextDecoder();
   let termEl: HTMLDivElement | undefined = $state();
   let url = $state<string | null>(null);
   let copied = $state(false);
@@ -27,7 +35,7 @@
   let fit: FitAddon | null = null;
   let ro: ResizeObserver | null = null;
 
-  const p = untrack(() => account.provider);
+  const p = untrack(() => ('provider' in account ? account.provider : 'github'));
   const settingsOnly = untrack(() => purpose !== 'signin');
   const usageOnly = untrack(() => purpose === 'usage');
 
@@ -46,10 +54,16 @@
     error = null;
     result = null;
     url = null;
+    code = null;
+    outText = '';
     term?.reset();
     const ch = new Channel<LoginEvent>();
     ch.onmessage = async (ev) => {
-      if (ev.kind === 'output') term?.write(decode(ev.data));
+      if (ev.kind === 'output') {
+        const bytes = decode(ev.data);
+        term?.write(bytes);
+        if (isGithub && !code) findCode(bytes);
+      }
       else if (ev.kind === 'url') url = ev.url;
       else if (ev.kind === 'exited') {
         running = false;
@@ -58,14 +72,9 @@
     };
     try {
       fit?.fit();
-      await invoke('start_login', {
-        loginId,
-        accountId: account.id,
-        deviceCode,
-        cols: term?.cols ?? 80,
-        rows: term?.rows ?? 12,
-        onEvent: ch,
-      });
+      const size = { cols: term?.cols ?? 80, rows: term?.rows ?? 12 };
+      if (isGithub) await invoke('start_github_login', { loginId, accountId: account.id, ...size, onEvent: ch });
+      else await invoke('start_login', { loginId, accountId: account.id, deviceCode, ...size, onEvent: ch });
       running = true;
       term?.focus();
     } catch (e) {
@@ -73,8 +82,32 @@
     }
   }
 
+  /** "First copy your one-time code: ABCD-1234" (colors removed). */
+  function findCode(bytes: Uint8Array) {
+    outText = (outText + decoder.decode(bytes, { stream: true })).slice(-4000);
+    const plain = outText.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+    const m = plain.match(/one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})/);
+    if (m) code = m[1];
+  }
+
+  async function copyCode() {
+    if (!code) return;
+    await navigator.clipboard.writeText(code).catch(() => {});
+    codeCopied = true;
+    setTimeout(() => (codeCopied = false), 1500);
+  }
+
   async function verify() {
     if (p === 'antigravity' || settingsOnly) return;
+    if (isGithub) {
+      try {
+        const a = await checkGithub(account.id);
+        result = a.status === 'signed_in' ? `Signed in${a.login ? ' as @' + a.login : ''}.` : 'Not signed in yet.';
+      } catch (e) {
+        error = String(e);
+      }
+      return;
+    }
     try {
       const a = await checkAccount(account.id);
       result = a.status === 'signed_in' ? `Signed in${a.email ? ' as ' + a.email : ''}.` : 'Not signed in yet.';
@@ -163,6 +196,9 @@
     {:else if p === 'claude'}
       <li>Copy the link and open it in the browser where you're signed in to the Claude account you want.</li>
       <li>Approve access. If the page shows a code, paste it in the terminal below and press Enter.</li>
+    {:else if p === 'github'}
+      <li>Copy the one-time code, then open the link in the browser where you're signed in to the GitHub account you want.</li>
+      <li>Paste the code there and click <b>Authorize</b>. The terminal below finishes by itself; then click <b>Done</b>.</li>
     {:else if p === 'codex'}
       <li>Copy the link and open it in the browser where you're signed in to the ChatGPT account you want.</li>
       <li>{deviceCode ? 'Enter the one-time code shown in the terminal below.' : 'Approve access. The terminal below finishes by itself.'}</li>
@@ -178,6 +214,14 @@
       <input type="checkbox" bind:checked={deviceCode} onchange={restartWithDeviceCode} />
       Use a one-time code (works in any browser, even on another device)
     </label>
+  {/if}
+
+  {#if code}
+    <div class="link">
+      <span class="codelabel">One-time code</span>
+      <code class="code">{code}</code>
+      <button class="primary" onclick={copyCode}>{codeCopied ? 'Copied' : 'Copy code'}</button>
+    </div>
   {/if}
 
   <div class="link" hidden={settingsOnly}>
@@ -226,6 +270,8 @@
   .actions { display: flex; gap: 8px; align-items: center; }
   .spacer { flex: 1; }
   .muted { color: var(--muted); font-size: 13px; }
+  .codelabel { color: var(--muted); font-size: 13px; }
+  .code { font-family: var(--mono); font-size: 16px; font-weight: 600; letter-spacing: 0.08em; padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
   .err { color: var(--danger); margin: 0; font-size: 13px; }
   .ok { color: var(--ok); margin: 0; font-size: 13px; font-weight: 600; }
 </style>

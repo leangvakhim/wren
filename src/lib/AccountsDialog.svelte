@@ -4,12 +4,15 @@
   import LimitBars from './LimitBars.svelte';
   import { planLimits, refreshLimits, sourceText } from './planLimits.svelte';
   import { accounts, accountsFor, checkAccount, loadAccounts, STATUS_LABEL } from './accounts.svelte';
-  import { PROVIDERS, type Account, type Provider } from './types';
+  import { checkGithub, github, installHint, loadGithub } from './github.svelte';
+  import { PROVIDERS, type Account, type GithubAccount, type Provider } from './types';
 
   let { open = $bindable(false), installed }: { open: boolean; installed: Partial<Record<Provider, string | null>> } = $props();
 
   let dlg: HTMLDialogElement | undefined = $state();
-  let signingIn = $state<Account | null>(null);
+  let signingIn = $state<Account | GithubAccount | null>(null);
+  let newGhName = $state('');
+  const gh = installHint();
   /** Antigravity: its own /usage screen in the terminal sheet. */
   let agyUsage = $state<Account | null>(null);
   let now = $state(Date.now());
@@ -97,12 +100,58 @@
     busyId = null;
   }
 
-  async function saveRename(a: Account) {
+  // ---- GitHub (through gh) ----
+
+  async function addGithub(existing: boolean) {
     error = null;
     try {
-      await invoke('rename_account', { id: a.id, name: renameText });
+      const name = existing ? newGhName.trim() || 'This computer' : newGhName;
+      const a = await invoke<GithubAccount>('add_github', { name, existing });
+      newGhName = '';
+      await loadGithub();
+      if (existing) await checkGh(a);
+      else signingIn = a; // start sign-in right away; Cancel keeps it for later
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function checkGh(a: GithubAccount) {
+    busyId = a.id;
+    error = null;
+    try {
+      await checkGithub(a.id);
+    } catch (e) {
+      error = String(e);
+    }
+    busyId = null;
+  }
+
+  async function removeGh(a: GithubAccount) {
+    busyId = a.id;
+    error = null;
+    try {
+      await invoke('remove_github', { id: a.id });
+      await loadGithub();
+    } catch (e) {
+      error = String(e);
+    }
+    busyId = null;
+  }
+
+  function ghStatus(a: GithubAccount): { text: string; tone: string } {
+    if (a.status === 'signed_in') return { text: a.login ? `Signed in as @${a.login}` : 'Signed in', tone: 'ok' };
+    if (a.status === 'unknown') return { text: 'Not checked yet', tone: 'muted' };
+    return { text: a.status === 'pending' ? 'Not signed in yet' : 'Signed out', tone: 'warn' };
+  }
+
+  async function saveRename(a: Account | GithubAccount) {
+    error = null;
+    try {
+      const isAI = 'provider' in a;
+      await invoke(isAI ? 'rename_account' : 'rename_github', { id: a.id, name: renameText });
       renaming = null;
-      await loadAccounts();
+      await (isAI ? loadAccounts() : loadGithub());
     } catch (e) {
       error = String(e);
     }
@@ -120,7 +169,7 @@
 
 <dialog bind:this={dlg} onclose={() => (open = false)} aria-labelledby="acc-title">
   <div class="head">
-    <h2 id="acc-title">{signingIn ? `Sign in · ${PROVIDERS[signingIn.provider].label} · ${signingIn.name}` : agyUsage ? 'Antigravity quota' : 'Accounts'}</h2>
+    <h2 id="acc-title">{signingIn ? `Sign in · ${'provider' in signingIn ? PROVIDERS[signingIn.provider].label : 'GitHub'} · ${signingIn.name}` : agyUsage ? 'Antigravity quota' : 'Accounts'}</h2>
     <button class="ghost" onclick={() => (signingIn ? (signingIn = null) : agyUsage ? (agyUsage = null) : (open = false))}>{signingIn || agyUsage ? 'Back' : 'Close'}</button>
   </div>
 
@@ -227,6 +276,67 @@
         </form>
       </section>
     {/each}
+
+    <section>
+      <h3>GitHub{github.gh === null ? ' (GitHub CLI not installed)' : ''}</h3>
+      <p class="note">
+        Pick a GitHub account per pane (menu in the pane's header). The AI's <code>gh</code> commands and <code>git push</code> /
+        <code>pull</code> in that pane then use it. Sign-in happens on github.com through the GitHub CLI; Wren never sees your token,
+        and your git settings on this computer aren't changed.
+      </p>
+      {#if github.gh === null}
+        <p class="note warnText">
+          Install the GitHub CLI first:
+          {#if gh.command}<code>{gh.command}</code> in Terminal, or download it from{:else}download it from{/if}
+          <code>{gh.url}</code>. Then reopen Wren.
+        </p>
+      {/if}
+      {#if !github.list.length}
+        <p class="note">No GitHub accounts in Wren yet.</p>
+      {/if}
+      <ul>
+        {#each github.list as a (a.id)}
+          {@const st = ghStatus(a)}
+          <li>
+            <span class={`dot ${st.tone}`} aria-hidden="true"></span>
+            <div class="who">
+              {#if renaming === a.id}
+                <label class="sr" for={`rn-${a.id}`}>New name</label>
+                <!-- svelte-ignore a11y_autofocus -->
+                <input id={`rn-${a.id}`} bind:value={renameText} maxlength="40" autofocus onkeydown={(e) => { if (e.key === 'Enter') saveRename(a); if (e.key === 'Escape') { e.preventDefault(); renaming = null; } }} />
+              {:else}
+                <span class="name">{a.name}</span>
+              {/if}
+              <span class="sub">{st.text}{a.is_default ? " · this computer's gh login" : ''}</span>
+            </div>
+            <div class="btns">
+              {#if renaming === a.id}
+                <button class="ghost" onclick={() => saveRename(a)}>Save</button>
+                <button class="ghost" onclick={() => (renaming = null)}>Cancel</button>
+              {:else}
+                <button class="ghost" disabled={!github.gh} onclick={() => (signingIn = a)}>Sign in</button>
+                <button class="ghost" disabled={busyId === a.id || !github.gh} onclick={() => checkGh(a)}>Check</button>
+                <button class="ghost" onclick={() => { renaming = a.id; renameText = a.name; }}>Rename</button>
+                <button
+                  class="ghost danger"
+                  disabled={busyId === a.id}
+                  onclick={() => removeGh(a)}
+                  title={a.is_default ? "Takes it off Wren's list. Your gh login on this computer stays as it is." : 'Signs this account out of gh and removes it'}
+                >Remove</button>
+              {/if}
+            </div>
+          </li>
+        {/each}
+      </ul>
+      <form class="add" onsubmit={(e) => { e.preventDefault(); addGithub(false); }}>
+        <label class="sr" for="add-github">New GitHub account name</label>
+        <input id="add-github" placeholder="New account name, e.g. Work" bind:value={newGhName} maxlength="40" />
+        <button class="ghost" type="submit" disabled={!newGhName.trim() || !github.gh}>Add account</button>
+        {#if !github.list.some((a) => a.is_default)}
+          <button class="ghost" type="button" disabled={!github.gh} onclick={() => addGithub(true)} title="Adds the gh login you already use in Terminal on this computer (no new sign-in)">Use this computer's login</button>
+        {/if}
+      </form>
+    </section>
   {/if}
 </dialog>
 

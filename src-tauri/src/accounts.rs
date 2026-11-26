@@ -252,7 +252,7 @@ impl AccountStore {
     }
 }
 
-fn unique_suffix() -> String {
+pub(crate) fn unique_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now()
@@ -263,7 +263,7 @@ fn unique_suffix() -> String {
 }
 
 /// Folders holding logins are readable only by you.
-fn create_private_dir(dir: &Path) -> Result<(), String> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {

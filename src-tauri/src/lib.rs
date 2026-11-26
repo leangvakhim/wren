@@ -1,6 +1,7 @@
 mod accounts;
 mod attachments;
 mod events;
+mod github;
 mod handoff;
 mod history;
 mod limits;
@@ -18,6 +19,7 @@ use tauri::{Manager as _, RunEvent, State};
 
 use accounts::{Account, AccountStatus, AccountStore, AccountsView};
 use events::{PlanLimits, UiEvent};
+use github::{GithubAccount, GithubStore};
 use history::{ConversationMeta, History};
 use login::{LoginEvent, LoginManager};
 use models::ModelInfo;
@@ -35,17 +37,34 @@ fn account_env(store: &AccountStore, cfg: &PaneConfig) -> Result<Vec<(String, St
     store.env_for(&id)
 }
 
+/// The AI account's environment plus, if the pane picked one, the GitHub
+/// account's (gh's login folder + git asking gh for github.com logins).
+fn pane_env(store: &AccountStore, gh: &GithubStore, cfg: &PaneConfig) -> Result<Vec<(String, String)>, String> {
+    let mut env = account_env(store, cfg)?;
+    env.extend(github_env(gh, cfg.github_account_id.as_deref())?);
+    Ok(env)
+}
+
+fn github_env(gh: &GithubStore, id: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let Some(id) = id.filter(|s| !s.is_empty()) else { return Ok(vec![]) };
+    let bin = github::gh_path().ok_or(
+        "This pane uses a GitHub account, but the GitHub CLI (gh) isn't installed. Install it, or set GitHub to None in the pane.",
+    )?;
+    gh.pane_env(id, &bin)
+}
+
 // ---------------- conversations ----------------
 
 #[tauri::command]
 fn open_pane(
     state: State<'_, Manager>,
     store: State<'_, AccountStore>,
+    gh: State<'_, GithubStore>,
     pane_id: String,
     config: PaneConfig,
     on_event: Channel<UiEvent>,
 ) -> Result<(), String> {
-    let env = account_env(&store, &config);
+    let env = pane_env(&store, &gh, &config);
     state.open(pane_id, config, env, on_event)
 }
 
@@ -53,10 +72,11 @@ fn open_pane(
 fn update_pane(
     state: State<'_, Manager>,
     store: State<'_, AccountStore>,
+    gh: State<'_, GithubStore>,
     pane_id: String,
     config: PaneConfig,
 ) -> Result<(), String> {
-    let env = account_env(&store, &config);
+    let env = pane_env(&store, &gh, &config);
     state.update(&pane_id, config, env)
 }
 
@@ -64,6 +84,14 @@ fn update_pane(
 #[tauri::command]
 fn set_model(state: State<'_, Manager>, pane_id: String, model: Option<String>, effort: Option<String>) -> Result<(), String> {
     state.set_model(&pane_id, model, effort)
+}
+
+/// Use another GitHub account in this pane (`config` = the pane's settings
+/// with the new `githubAccountId`); the conversation continues.
+#[tauri::command]
+fn set_github(state: State<'_, Manager>, store: State<'_, AccountStore>, gh: State<'_, GithubStore>, pane_id: String, config: PaneConfig) -> Result<(), String> {
+    let env = pane_env(&store, &gh, &config);
+    state.set_github(&pane_id, config.github_account_id.filter(|s| !s.is_empty()), env)
 }
 
 /// Turn Study / Deep research on or off; the conversation continues.
@@ -113,11 +141,12 @@ async fn plan_limits(store: State<'_, AccountStore>, account_id: String) -> Resu
 fn resume_conversation(
     state: State<'_, Manager>,
     store: State<'_, AccountStore>,
+    gh: State<'_, GithubStore>,
     pane_id: String,
     config: PaneConfig,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    let env = account_env(&store, &config);
+    let env = pane_env(&store, &gh, &config);
     state.resume(&pane_id, config, env, session_id)
 }
 
@@ -307,6 +336,73 @@ fn rename_account(store: State<'_, AccountStore>, id: String, name: String) -> R
     store.rename(&id, &name)
 }
 
+// ---------------- GitHub accounts (through gh) ----------------
+
+/// Where gh is installed (None = not installed).
+#[tauri::command]
+fn github_cli() -> Option<String> {
+    github::gh_path().map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn list_github(gh: State<'_, GithubStore>) -> Vec<GithubAccount> {
+    gh.list()
+}
+
+#[tauri::command]
+fn add_github(gh: State<'_, GithubStore>, name: String, existing: Option<bool>) -> Result<GithubAccount, String> {
+    gh.add(&name, existing == Some(true))
+}
+
+#[tauri::command]
+fn rename_github(gh: State<'_, GithubStore>, id: String, name: String) -> Result<(), String> {
+    gh.rename(&id, &name)
+}
+
+/// Ask gh whether this account is signed in (and as whom), and save the answer.
+#[tauri::command]
+async fn check_github(gh: State<'_, GithubStore>, id: String) -> Result<GithubAccount, String> {
+    let env = gh.gh_env(&id)?;
+    let (status, login) = github::check_status(&env).await?;
+    gh.set_status(&id, status, login)?;
+    gh.get(&id)
+}
+
+/// Signs a Wren-added account out in gh, then removes it. For this computer's
+/// own gh login only the label goes.
+#[tauri::command]
+async fn remove_github(gh: State<'_, GithubStore>, id: String) -> Result<(), String> {
+    let acc = gh.get(&id)?;
+    if let Some(dir) = gh.dir_for(&acc)
+        && dir.exists() {
+            let env = gh.gh_env(&id).unwrap_or_default();
+            let _ = github::sign_out(&env, acc.login.as_deref()).await;
+        }
+    gh.remove(&id)
+}
+
+/// gh's own browser sign-in in the terminal sheet.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn start_github_login(
+    logins: State<'_, LoginManager>,
+    gh: State<'_, GithubStore>,
+    login_id: String,
+    account_id: String,
+    cols: u16,
+    rows: u16,
+    on_event: Channel<LoginEvent>,
+) -> Result<(), String> {
+    let acc = gh.get(&account_id)?;
+    let scratch = match gh.dir_for(&acc) {
+        Some(d) => d,
+        None => std::env::temp_dir().join("wren-gh-login"),
+    };
+    accounts::create_private_dir(&scratch)?;
+    let env = github::login_env(gh.gh_env(&account_id)?, &scratch);
+    logins.start_program(login_id, "gh", github::login_args(), env, cols, rows, on_event)
+}
+
 /// "Reset Wren": deletes everything Wren keeps on this computer (accounts list,
 /// conversations, attachments) and restarts Wren. Accounts Wren created are
 /// signed out first so their CLI logins (e.g. macOS Keychain items) go too.
@@ -327,6 +423,18 @@ async fn reset_wren(app: tauri::AppHandle) -> Result<(), String> {
     };
     for (provider, env) in sign_outs {
         let _ = accounts::sign_out(provider, &env).await;
+    }
+    type Env = Vec<(String, String)>;
+    let gh_sign_outs: Vec<(Env, Option<String>)> = {
+        let gh = app.state::<GithubStore>();
+        gh.added()
+            .into_iter()
+            .filter(|a| gh.dir_for(a).is_some_and(|d| d.exists()))
+            .filter_map(|a| gh.gh_env(&a.id).ok().map(|env| (env, a.login.clone())))
+            .collect()
+    };
+    for (env, login) in gh_sign_outs {
+        let _ = github::sign_out(&env, login.as_deref()).await;
     }
     let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     // Only ever Wren's own folder (named after the app id).
@@ -426,6 +534,7 @@ pub fn run() {
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             let data = app.path().app_data_dir()?;
             app.manage(AccountStore::load(&data));
+            app.manage(GithubStore::load(&data));
             app.manage(History::load(&data));
             let store = attachments::Store::new(&data);
             app.state::<Manager>().set_attach_dir(store.dir().to_string_lossy().to_string());
@@ -441,6 +550,7 @@ pub fn run() {
             attachment_preview,
             set_model,
             set_mode,
+            set_github,
             answer_approval,
             answer_question,
             carry_session,
@@ -471,6 +581,13 @@ pub fn run() {
             login_input,
             login_resize,
             cancel_login,
+            github_cli,
+            list_github,
+            add_github,
+            rename_github,
+            check_github,
+            remove_github,
+            start_github_login,
             reset_wren
         ])
         .build(tauri::generate_context!())

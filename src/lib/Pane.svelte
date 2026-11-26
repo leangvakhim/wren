@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke, Channel } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Logo from './Logo.svelte';
   import PeckingWren from './PeckingWren.svelte';
   import ModelPicker from './ModelPicker.svelte';
@@ -15,6 +15,7 @@
   import { buildRecap, formatWait, isLimitMessage, isRecapBubble, parseResetTime } from './limits';
   import { CHECK_ICON, COPY_ICON, copyText, renderMarkdown } from './markdown';
   import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
+  import { findGithub, github, githubLabel } from './github.svelte';
   import { MODES, PROVIDERS, PERMISSIONS, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
 
   let {
@@ -1038,6 +1039,25 @@
     continueWith('switch');
   }
 
+  /** Another GitHub account (or None): the CLI restarts with it, the conversation continues. */
+  async function changeGithub() {
+    try {
+      if (opened) await invoke('set_github', { paneId, config: $state.snapshot(config) });
+    } catch (e) {
+      push({ role: 'error', text: String(e) });
+    }
+  }
+
+  // A GitHub account removed in Accounts: this pane goes back to None.
+  $effect(() => {
+    if (github.loaded && config.githubAccountId && !findGithub(config.githubAccountId)) {
+      untrack(() => {
+        config.githubAccountId = '';
+        changeGithub();
+      });
+    }
+  });
+
   /** The user picked another account after hitting a limit. Never automatic. */
   function switchAccount() {
     if (!switchTo) return;
@@ -1171,6 +1191,23 @@
         <option value="">No account yet</option>
       {/each}
     </select>
+
+    {#if github.list.length || config.githubAccountId}
+      <label class="sr" for={`${paneId}-github`}>GitHub account</label>
+      <select
+        id={`${paneId}-github`}
+        class="github"
+        bind:value={config.githubAccountId}
+        disabled={busy}
+        onchange={changeGithub}
+        title="GitHub account that gh and git push / pull use in this pane. None = your computer's normal setup."
+      >
+        <option value="">GitHub: None</option>
+        {#each github.list as g (g.id)}
+          <option value={g.id}>GitHub: {githubLabel(g)}</option>
+        {/each}
+      </select>
+    {/if}
 
     <label class="sr" for={`${paneId}-perm`}>Permission</label>
     <select
@@ -1749,6 +1786,7 @@
   .linklike { background: none; border: 0; color: var(--accent); text-decoration: underline; cursor: pointer; padding: 0 4px; font: inherit; }
   .banner.limit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   select.account { max-width: 220px; }
+  select.github { max-width: 200px; }
   .usage { width: 100%; max-width: calc(64rem + 24px); margin: 0 auto; padding: 0 12px 8px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
   .limmeter { margin-left: auto; display: inline-flex; gap: 10px; background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
   .limmeter:hover { color: var(--text); }
