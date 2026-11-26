@@ -2,14 +2,25 @@
   import { onMount } from 'svelte';
   import { MODES, type Mode, type Provider } from './types';
 
-  /** The "+" button in the message box: Study and Deep research (like Claude Desktop). */
+  /** The "+" button in the message box: files, Study, Deep research, Visualize, and the AI's browser (like Claude Desktop). */
   let {
     mode = $bindable(null),
+    aiBrowser = $bindable(false),
     provider,
     disabled = false,
     onchange,
     onaddfiles,
-  }: { mode?: Mode | null; provider: Provider; disabled?: boolean; onchange: () => void; onaddfiles?: () => void } = $props();
+    onbrowser,
+  }: {
+    mode?: Mode | null;
+    aiBrowser?: boolean;
+    provider: Provider;
+    disabled?: boolean;
+    onchange: () => void;
+    onaddfiles?: () => void;
+    /** "Browser for the AI" switched on or off. */
+    onbrowser?: () => void;
+  } = $props();
 
   let open = $state(false);
   let root: HTMLDivElement | undefined = $state();
@@ -26,7 +37,18 @@
       codex: 'Live web search, high reasoning effort',
       antigravity: "Antigravity's own web search + research instructions",
     },
+    visualize: {
+      claude: 'Visualization instructions; the page opens in the browser panel',
+      codex: 'Visualization instructions; the page opens in the browser panel',
+      antigravity: 'Visualization instructions sent with each message',
+    },
   };
+
+  function toggleBrowser() {
+    aiBrowser = !aiBrowser;
+    open = false;
+    onbrowser?.();
+  }
 
   function pick(m: Mode) {
     mode = mode === m ? null : m;
@@ -51,6 +73,8 @@
 {#snippet icon(m: Mode)}
   {#if m === 'study'}
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 9 12 4 2 9l10 5 10-5z" /><path d="M6 11v5c3 2 9 2 12 0v-5" /></svg>
+  {:else if m === 'visualize'}
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="m10 8.5 4.5 2.5-4.5 2.5z" /><path d="M8 21h8" /></svg>
   {:else}
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5M8 11h6M11 8v6" /></svg>
   {/if}
@@ -62,15 +86,15 @@
     {disabled}
     aria-haspopup="menu"
     aria-expanded={open}
-    aria-label="Add files, Study or Deep research"
-    title="Add files, Study or Deep research"
+    aria-label="Add files, modes and the AI's browser"
+    title="Add files, Study, Deep research, Visualize, Browser for the AI"
     onclick={() => (open = !open)}
     onkeydown={(e) => e.key === 'Escape' && (open = false)}
   >
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
   </button>
   {#if open}
-    <div class="pop" role="menu" tabindex="-1" aria-label="Add or choose a mode" onkeydown={(e) => e.key === 'Escape' && (open = false)}>
+    <div class="pop" data-overlay role="menu" tabindex="-1" aria-label="Add or choose a mode" onkeydown={(e) => e.key === 'Escape' && (open = false)}>
       {#if onaddfiles}
         <button class="row" role="menuitem" onclick={() => { open = false; onaddfiles(); }}>
           <span class="title">
@@ -89,10 +113,36 @@
           <small>{HOW[m][provider]}</small>
         </button>
       {/each}
-      <p class="note">Turning a mode on or off keeps the conversation.</p>
+      <div class="sep" role="separator"></div>
+      <button
+        class="row"
+        class:sel={aiBrowser}
+        role="menuitemcheckbox"
+        aria-checked={aiBrowser}
+        disabled={provider === 'antigravity'}
+        onclick={toggleBrowser}
+      >
+        <span class="title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg>
+          Browser for the AI{#if aiBrowser}<span class="on">On</span>{/if}
+        </span>
+        {#if provider === 'antigravity'}
+          <span class="hint">Not available for Antigravity: it can only add tools to its settings for every project, which Wren doesn't change.</span>
+        {:else}
+          <span class="hint">The AI can open pages, click and take screenshots in its own Chrome window (a fresh profile, not your logins), e.g. to check a site it builds. Needs Node.js.</span>
+        {/if}
+      </button>
+      <p class="note">Turning a mode or the browser on or off keeps the conversation.</p>
     </div>
   {/if}
 </div>
+{#if aiBrowser && provider !== 'antigravity'}
+  <button class="chip on" {disabled} onclick={toggleBrowser} title="The AI has a browser in this pane. Click to turn it off." aria-label="Turn off Browser for the AI">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg>
+    <span>Browser</span>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+  </button>
+{/if}
 {#if mode}
   <button class="chip on" {disabled} onclick={clear} title={`${MODES[mode].label} is on. Click to turn it off.`} aria-label={`Turn off ${MODES[mode].label}`}>
     {@render icon(mode)}
@@ -144,7 +194,8 @@
     border-radius: 8px;
     cursor: pointer;
   }
-  .row:hover { background: var(--surface-2); }
+  .row:hover:not(:disabled) { background: var(--surface-2); }
+  .row:disabled { cursor: default; opacity: 0.6; }
   .row.sel { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent-fill); }
   .title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
   .on { font-size: 11px; font-weight: 600; color: var(--accent); margin-left: 4px; }

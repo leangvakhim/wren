@@ -43,6 +43,10 @@ pub struct PaneConfig {
     /// computer's normal setup).
     #[serde(default)]
     pub github_account_id: Option<String>,
+    /// "Browser for the AI": the CLI gets a browser tool (Playwright MCP)
+    /// for this session only.
+    #[serde(default)]
+    pub ai_browser: bool,
 }
 
 struct Running {
@@ -68,6 +72,8 @@ struct Session {
     link: Link,
     /// Wren's attachments folder (Claude Code may read it).
     attach_dir: Option<String>,
+    /// Where the AI's browser tool saves screenshots.
+    browser_dir: Option<String>,
 }
 
 impl Session {
@@ -90,11 +96,19 @@ pub struct Manager {
     sessions: Mutex<HashMap<String, Session>>,
     /// Wren's attachments folder: Claude Code gets read access to it (`--add-dir`).
     attach_dir: Mutex<Option<String>>,
+    /// Output folder of the AI's browser tool.
+    browser_dir: Mutex<Option<String>>,
 }
 
 impl Manager {
     pub fn set_attach_dir(&self, dir: String) {
         if let Ok(mut d) = self.attach_dir.lock() {
+            *d = Some(dir);
+        }
+    }
+
+    pub fn set_browser_dir(&self, dir: String) {
+        if let Ok(mut d) = self.browser_dir.lock() {
             *d = Some(dir);
         }
     }
@@ -123,6 +137,7 @@ impl Manager {
                 generation: Arc::new(AtomicU64::new(0)),
                 link: new_link(true),
                 attach_dir: self.attach_dir.lock().ok().and_then(|d| d.clone()),
+                browser_dir: self.browser_dir.lock().ok().and_then(|d| d.clone()),
             },
         );
         Ok(())
@@ -249,6 +264,15 @@ impl Manager {
         Ok(())
     }
 
+    /// Turn "Browser for the AI" on or off WITHOUT losing the conversation.
+    pub fn set_ai_browser(&self, pane_id: &str, on: bool) -> Result<(), String> {
+        let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get_mut(pane_id).ok_or("unknown pane")?;
+        s.kill();
+        s.cfg.ai_browser = on;
+        Ok(())
+    }
+
     /// Open a saved conversation in this pane and continue it.
     pub fn resume(
         &self,
@@ -327,6 +351,13 @@ fn spawn(s: &mut Session) -> Result<(), String> {
     {
         // Attached files are read from Wren's private folder.
         cmd.arg("--add-dir").arg(d);
+    }
+    if s.cfg.ai_browser && provider != Provider::Antigravity {
+        let npx = which::which_in("npx", Some(&path_var), &s.cfg.cwd).map_err(|_| {
+            "\"Browser for the AI\" needs Node.js (it runs the browser tool with npx). Install Node.js from nodejs.org, or turn the browser off in the + menu.".to_string()
+        })?;
+        let out = s.browser_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("wren-browser").to_string_lossy().to_string());
+        cmd.args(provider.browser_args(&npx.to_string_lossy(), &out, s.cfg.permission));
     }
     cmd
         .current_dir(&s.cfg.cwd)
@@ -591,6 +622,7 @@ mod tests {
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
         let card_id = |events: &Arc<Mutex<Vec<String>>>, n: usize| {
             let e = events.lock().unwrap();
@@ -661,6 +693,7 @@ mod tests {
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
         let cfgdir = std::env::temp_dir().join(format!("wren-manual-{}", std::process::id()));
         let env = vec![
@@ -714,6 +747,7 @@ mod tests {
                 effort: None,
                 mode: None,
                 github_account_id: None,
+                ai_browser: false,
             };
             let env = vec![
                 ("ANTHROPIC_BASE_URL".to_string(), api.clone()),
@@ -768,6 +802,7 @@ mod tests {
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -820,6 +855,7 @@ mod tests {
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -877,6 +913,7 @@ mod tests {
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
         let env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), api),
@@ -958,6 +995,7 @@ done
             effort: None,
             mode: None,
             github_account_id: None,
+            ai_browser: false,
         };
 
         tauri::async_runtime::block_on(async {

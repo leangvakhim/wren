@@ -7,6 +7,7 @@
   import ModelPicker from './ModelPicker.svelte';
   import ModeMenu from './ModeMenu.svelte';
   import QuestionCard from './QuestionCard.svelte';
+  import BrowserPanel from './BrowserPanel.svelte';
   import { applyLimitEvent, dismissedWarnings, levelOf, planLimits, refreshLimits, resetText, usedNow } from './planLimits.svelte';
   import { estimateCost } from './pricing';
   import { getConversation, saveConversation } from './history.svelte';
@@ -188,6 +189,99 @@
 
   /** Index in `messages` where the current turn's answer starts (for Deep research reports). */
   let turnStart = 0;
+  /** When the current turn was sent (ms), to find the pages it made. */
+  let turnSentAt = 0;
+
+  // ---- the browser panel next to the chat ----
+  let browserOpen = $state(false);
+  let browser: BrowserPanel | undefined = $state();
+  /** Share of the pane's width the browser takes (drag the divider). */
+  let browserShare = $state(0.5);
+  let bodyEl: HTMLDivElement | undefined = $state();
+
+  /** Open an address in this pane's browser panel. */
+  async function openInBrowser(url: string) {
+    browserOpen = true;
+    await tick();
+    browser?.go(url);
+  }
+
+  /** Open a page from the project (e.g. visuals/quicksort.html) in the panel. */
+  async function openVisual(path: string) {
+    try {
+      openInBrowser(await invoke<string>('visual_url', { cwd: config.cwd, path }));
+    } catch (e) {
+      push({ role: 'error', text: String(e) });
+    }
+  }
+
+  /** Same page twice (relative and full path) counts once. */
+  const fullPath = (p: string) => (/^([a-zA-Z]:)?[\\/]/.test(p) ? p : `${config.cwd.replace(/[\\/]+$/, '')}/${p.replace(/^\.\//, '')}`);
+
+  /**
+   * After a turn: pages the AI wrote (any .html in its tool calls, or new
+   * files in visuals/) get a card. In Visualize mode the newest opens by itself.
+   */
+  async function showNewVisuals() {
+    if (!config.cwd) return;
+    // Newest pages in visuals/ first, then any other .html the AI wrote.
+    const paths = new Set<string>();
+    try {
+      for (const p of await invoke<string[]>('recent_visuals', { cwd: config.cwd, since: Math.max(0, turnSentAt - 2000) })) paths.add(fullPath(p));
+    } catch {}
+    for (const m of messages.slice(turnStart)) {
+      if (m.role !== 'tool' || m.isError || !m.detail) continue;
+      if (!/^(write|edit|multiedit|write_to_file|create_file|replace_file_content|apply_patch)$/i.test(m.text)) continue;
+      for (const hit of m.detail.matchAll(/([^\s,'"]+\.html?)\b/gi)) paths.add(fullPath(hit[1]));
+    }
+    let first: string | null = null;
+    for (const full of paths) {
+      push({ role: 'visual', text: full.split(/[\\/]/).pop() ?? full, detail: full });
+      first ??= full;
+    }
+    if (first) persist();
+    if (first && config.mode === 'visualize') openVisual(first);
+  }
+
+  /** Drag the divider between the chat and the browser. */
+  function dragDivider(e: PointerEvent) {
+    const el = bodyEl;
+    if (!el) return;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+    const r = el.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      const share = 1 - (ev.clientX - r.left) / r.width;
+      browserShare = Math.min(0.8, Math.max(0.2, share));
+    };
+    const up = () => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', up);
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', up);
+  }
+
+  function nudgeDivider(e: KeyboardEvent) {
+    if (e.key === 'ArrowLeft') browserShare = Math.min(0.8, browserShare + 0.05);
+    else if (e.key === 'ArrowRight') browserShare = Math.max(0.2, browserShare - 0.05);
+  }
+
+  /** "Browser for the AI" switched: the CLI restarts with (or without) the tool; the conversation continues. */
+  async function changeAiBrowser() {
+    try {
+      if (opened) await invoke('set_ai_browser', { paneId, on: !!config.aiBrowser });
+      push({
+        role: 'info',
+        text: config.aiBrowser
+          ? `Browser for the AI is on. ${providerLabel} can open pages in its own Chrome window${config.permission === 'manual' ? ' (it asks first)' : ''}. The first start downloads the browser tool.`
+          : 'Browser for the AI is off.',
+      });
+      scrollToEnd(true);
+    } catch (e) {
+      push({ role: 'error', text: String(e) });
+    }
+  }
   /** Claude sent fresh limit numbers during this turn. */
   let sawLimitEvent = false;
   /** Ticks every minute so "resets in …" and reset windows stay current. */
@@ -798,6 +892,7 @@
         } else if (config.mode === 'research') {
           saveResearchReport();
         }
+        if (!ev.error) showNewVisuals();
         // Codex doesn't report limits during a turn, so ask it (at most once a minute).
         // Claude normally sends them during the turn; ask only if it didn't.
         if (config.provider === 'codex') refreshLimits(config.accountId, 'codex', 60_000);
@@ -870,7 +965,7 @@
       push({
         role: 'info',
         text: config.mode
-          ? `${MODES[config.mode].label} is on.${config.mode === 'research' ? ' The final report is also saved in the project folder under research/.' : ''}`
+          ? `${MODES[config.mode].label} is on.${config.mode === 'research' ? ' The final report is also saved in the project folder under research/.' : ''}${config.mode === 'visualize' ? ' Ask about an idea or algorithm: the animation is saved under visuals/ and opens in the browser panel.' : ''}`
           : 'Back to normal mode.',
       });
       persist();
@@ -1111,6 +1206,7 @@
     sawLimitEvent = false;
     push({ role: 'user', text: shownText, files: files.length ? files : undefined });
     turnStart = messages.length;
+    turnSentAt = Date.now();
     persist();
     busy = true;
     thinking = false;
@@ -1136,12 +1232,18 @@
     }
   }
 
-  // Links inside answers must not navigate the app window.
+  // Links inside answers never navigate the app window: web links and the
+  // project's pages open in the browser panel.
   function blockLinks(e: MouseEvent) {
     const t = e.target as HTMLElement;
     const copy = t.closest<HTMLButtonElement>('button.copybtn');
     if (copy) return void copyCode(copy);
-    if (t.closest('a')) e.preventDefault();
+    const a = t.closest('a');
+    if (!a) return;
+    e.preventDefault();
+    const href = a.getAttribute('href') ?? '';
+    if (/^https?:\/\//i.test(href)) openInBrowser(href);
+    else if (/\.(html?|svg)([?#].*)?$/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href)) openVisual(decodeURIComponent(href.replace(/^file:\/\//, '').replace(/[?#].*$/, '')));
   }
 
   const fmt = (n: number) => (n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
@@ -1228,6 +1330,16 @@
     {#if busy}
       <button class="ghost" onclick={stop} title="Stop the current task">Stop</button>
     {/if}
+    <button
+      class="ghost browserbtn"
+      class:on={browserOpen}
+      onclick={() => (browserOpen = !browserOpen)}
+      aria-pressed={browserOpen}
+      title={browserOpen ? 'Close the browser panel' : 'Open a browser next to this chat'}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg>
+      <span>Browser</span>
+    </button>
     <button class="ghost" onclick={newConversation} title="New conversation (or type \new)">New</button>
     {#if closable}
       <button class="ghost close" onclick={requestClose} aria-label={`Close conversation ${index + 1}`} title="Close this pane">
@@ -1304,6 +1416,8 @@
     </div>
   {/each}
 
+  <div class="body" bind:this={bodyEl}>
+  <div class="chat">
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="messages" bind:this={listEl} onclick={blockLinks} onscroll={onListScroll}>
     {#if messages.length === 0}
@@ -1445,6 +1559,12 @@
             answers={m.answers}
             onsubmit={(a) => answerQuestion(m, a)}
           />
+        {:else if m.role === 'visual'}
+          <div class="visual">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="m10 8.5 4.5 2.5-4.5 2.5z" /><path d="M8 21h8" /></svg>
+            <span class="vtext"><b>{m.text}</b><small title={m.detail}>{m.detail && config.cwd && m.detail.startsWith(config.cwd) ? m.detail.slice(config.cwd.length).replace(/^[\\/]/, '') : m.detail}</small></span>
+            <button class="primary" onclick={() => m.detail && openVisual(m.detail)}>Open</button>
+          </div>
         {:else if m.role === 'divider'}
           <div class="divider" role="separator" aria-label={m.text}><span>{m.text}</span></div>
         {:else if m.role === 'notice'}
@@ -1495,7 +1615,7 @@
         disabled={missing}
       ></textarea>
       <div class="tools">
-        <ModeMenu bind:mode={config.mode} provider={config.provider} disabled={busy || missing} onchange={changeMode} onaddfiles={pickFiles} />
+        <ModeMenu bind:mode={config.mode} bind:aiBrowser={config.aiBrowser} provider={config.provider} disabled={busy || missing} onchange={changeMode} onaddfiles={pickFiles} onbrowser={changeAiBrowser} />
         <button class="chip" onclick={pickFolder} disabled={busy} title={config.cwd ? `Project folder: ${config.cwd}` : 'Choose a project folder'}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
           <span>{folderName || 'Choose folder'}</span>
@@ -1538,6 +1658,24 @@
         {/each}
       </button>
     {/if}
+  </div>
+  </div>
+  {#if browserOpen}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="vsplit"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the browser"
+      aria-valuenow={Math.round(browserShare * 100)}
+      tabindex="0"
+      onpointerdown={dragDivider}
+      onkeydown={nudgeDivider}
+    ></div>
+    <div class="bpane" style:flex-basis={`${browserShare * 100}%`}>
+      <BrowserPanel bind:this={browser} {paneId} onclose={() => (browserOpen = false)} />
+    </div>
+  {/if}
   </div>
   {#if viewing}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1583,6 +1721,19 @@
   select.danger { color: var(--danger); border-color: var(--danger); }
   .model { font-size: 12px; color: var(--muted); font-family: var(--mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .banner { margin: 0; padding: 8px 12px; background: var(--warn-bg); color: var(--text); font-size: 13px; }
+  /* The chat, and the browser panel next to it when open. */
+  .body { flex: 1; min-height: 0; display: flex; }
+  .chat { flex: 1 1 0; min-width: 240px; display: flex; flex-direction: column; min-height: 0; }
+  .bpane { flex: 0 0 50%; min-width: 240px; display: flex; min-height: 0; border-left: 1px solid var(--border); }
+  .vsplit { flex: 0 0 6px; margin: 0 -3px; cursor: col-resize; z-index: 1; position: relative; }
+  .vsplit:hover, .vsplit:focus-visible { background: color-mix(in oklab, var(--accent-fill) 40%, transparent); outline: none; }
+  .browserbtn { display: inline-flex; align-items: center; gap: 5px; }
+  .browserbtn.on { color: var(--accent); border-color: var(--accent); }
+  .visual { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px 8px 12px; background: var(--surface-2); font-size: 13px; }
+  .visual svg { color: var(--accent); flex-shrink: 0; }
+  .vtext { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .vtext b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vtext small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .messages {
     position: relative;
     flex: 1;

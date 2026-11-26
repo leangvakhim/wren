@@ -23,6 +23,38 @@ use crate::link::{Link, Pending};
 
 const TOOL_OUTPUT_MAX: usize = 4000;
 
+/// The browser tool for "Browser for the AI" (pinned, not @latest, so an
+/// update can't change what runs without Wren being updated).
+pub const PLAYWRIGHT_MCP: &str = "@playwright/mcp@0.0.86";
+/// Its MCP server name (Claude's tools are then `mcp__wren_browser__…`).
+pub const BROWSER_SERVER: &str = "wren_browser";
+/// Browser tools Claude may use without asking in Auto (checked against
+/// Playwright MCP 0.0.86's tool list).
+const BROWSER_AUTO_TOOLS: &[&str] = &[
+    "browser_navigate",
+    "browser_navigate_back",
+    "browser_snapshot",
+    "browser_take_screenshot",
+    "browser_click",
+    "browser_hover",
+    "browser_type",
+    "browser_press_key",
+    "browser_select_option",
+    "browser_fill_form",
+    "browser_drag",
+    "browser_wait_for",
+    "browser_tabs",
+    "browser_resize",
+    "browser_close",
+    "browser_find",
+    "browser_evaluate",
+    "browser_console_messages",
+    "browser_network_requests",
+    "browser_network_request",
+    "browser_handle_dialog",
+    "browser_emulate_media",
+];
+
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -72,6 +104,8 @@ pub enum Mode {
     Study,
     /// Search the web widely and write a cited report.
     Research,
+    /// Explain with an interactive animation page, shown in Wren's browser panel.
+    Visualize,
 }
 
 pub const STUDY_PROMPT: &str = "Study mode is on. Act as a patient tutor, not just a problem solver:\n\
@@ -89,11 +123,20 @@ pub const RESEARCH_PROMPT: &str = "Deep research mode is on. Treat the request a
 4. Write the final answer as a complete Markdown report: start with a '# ' title line, then a short summary, then sections with findings, then 'Open questions' if any, then a numbered 'Sources' list with title and URL. Cite sources inline as [1], [2].\n\
 Do not create or edit files for the report: Wren saves your final answer as a Markdown file in the project folder automatically. Local files in the project may be read when they are relevant.";
 
+pub const VISUALIZE_PROMPT: &str = "Visualize mode is on. The user learns best by seeing ideas move. Explain each new concept, algorithm or abstract idea with an interactive visualization:\n\
+1. Write ONE self-contained HTML file in the project's `visuals/` folder (create the folder if needed), named after the topic in kebab-case, e.g. `visuals/quicksort.html`. Put all CSS and JavaScript inline. No external scripts, fonts, images or network requests, so it works offline. Wren opens the file automatically in its browser panel next to the chat.\n\
+2. Animate the idea step by step: Play/Pause, Step back, Step forward, Reset and a speed slider. Where it helps, let the user change the input (array values, sizes, parameters) and re-run. Show a caption for every step that says what happens and why, and highlight what changes.\n\
+3. Be correct: compute the real steps of the algorithm or the real math first, then animate those steps. Never fake the motion.\n\
+4. Use SVG or Canvas. It must be readable from 360 px to 1200 px wide, follow the system light/dark theme (prefers-color-scheme), and work with the keyboard (Space = play/pause, Left/Right = step).\n\
+5. In the chat: a short explanation (the key idea, how to read the animation, one thing to try) and the file path. Do not paste the HTML into the chat.\n\
+For a follow-up about the same topic, update the same file unless the user asks for a new one. If you have a browser tool, open the page and check that it works before answering.";
+
 impl Mode {
     pub fn prompt(self) -> &'static str {
         match self {
             Mode::Study => STUDY_PROMPT,
             Mode::Research => RESEARCH_PROMPT,
+            Mode::Visualize => VISUALIZE_PROMPT,
         }
     }
 
@@ -206,6 +249,10 @@ impl Provider {
                         push("--allowedTools");
                         push("WebSearch WebFetch Agent");
                     }
+                    Some(Mode::Visualize) => {
+                        push("--append-system-prompt");
+                        push(VISUALIZE_PROMPT);
+                    }
                     None => {}
                 }
             }
@@ -273,6 +320,42 @@ impl Provider {
             }
         }
         a
+    }
+
+    /// "Browser for the AI": extra arguments that give this session (only) the
+    /// Playwright MCP browser tool. `npx` = full path of npx; `out_dir` = where
+    /// its screenshots go. Antigravity can only add tools to its global
+    /// settings, so it gets none (the UI explains why).
+    pub fn browser_args(self, npx: &str, out_dir: &str, perm: Permission) -> Vec<String> {
+        let server_args = vec!["-y".to_string(), PLAYWRIGHT_MCP.to_string(), "--isolated".to_string(), "--output-dir".to_string(), out_dir.to_string()];
+        match self {
+            Provider::Claude => {
+                let cfg = json!({"mcpServers": {BROWSER_SERVER: {"type": "stdio", "command": npx, "args": server_args}}});
+                let mut a = vec!["--mcp-config".to_string(), cfg.to_string()];
+                // Auto refuses anything that would ask, so the normal browsing
+                // tools are allowed up front. Not `browser_run_code_unsafe`
+                // (runs code on this computer) or `browser_file_upload` (sends
+                // local files to a site). Manual / Plan ask on a card; Full
+                // skips all checks anyway.
+                if perm == Permission::Auto {
+                    a.push("--allowedTools".into());
+                    a.push(BROWSER_AUTO_TOOLS.iter().map(|t| format!("mcp__{BROWSER_SERVER}__{t}")).collect::<Vec<_>>().join(" "));
+                }
+                a
+            }
+            Provider::Codex => {
+                let toml = |v: &Value| v.to_string();
+                vec![
+                    "-c".into(),
+                    format!("mcp_servers.{BROWSER_SERVER}.command={}", toml(&json!(npx))),
+                    "-c".into(),
+                    format!("mcp_servers.{BROWSER_SERVER}.args={}", toml(&json!(server_args))),
+                    "-c".into(),
+                    format!("mcp_servers.{BROWSER_SERVER}.startup_timeout_sec=120"),
+                ]
+            }
+            Provider::Antigravity => vec![],
+        }
     }
 
     /// Extra environment variables. Privacy: turn off non-essential traffic
@@ -449,7 +532,7 @@ impl Parser {
         let allow_session = match &pending {
             Pending::Claude { .. } => true,
             Pending::Codex { session_ok, .. } => *session_ok,
-            Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. } => false,
+            Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. } | Pending::CodexMcpTool { .. } => false,
         };
         if let Ok(mut l) = self.link.lock() {
             l.pending.insert(id.clone(), pending);
@@ -687,6 +770,21 @@ impl Parser {
                     }
                     "item/tool/requestUserInput" if !codex_questions(p).is_empty() => {
                         out.push(self.question(wid, Pending::CodexQuestion { rpc_id }, codex_questions(p)));
+                    }
+                    // Codex asks before running an MCP tool (e.g. the browser tool).
+                    "mcpServer/elicitation/request" if p["_meta"]["codex_approval_kind"] == "mcp_tool_call" => {
+                        let server = p["serverName"].as_str().unwrap_or("MCP");
+                        let tool = p["_meta"]["tool_name"].as_str().or(p["_meta"]["tool_title"].as_str()).unwrap_or("a tool");
+                        let label = if server == BROWSER_SERVER { "Browser".to_string() } else { server.to_string() };
+                        let params = &p["_meta"]["tool_params"];
+                        let what = if params.is_null() { tool.to_string() } else { format!("{tool}: {}", summarize_input(params)) };
+                        let why = p["message"].as_str().map(String::from).filter(|m| !m.is_empty());
+                        out.push(self.ask(wid, Pending::CodexMcpTool { rpc_id }, &label, what, why));
+                    }
+                    // Other MCP forms: decline (Wren can't show them yet).
+                    "mcpServer/elicitation/request" => {
+                        self.replies.push(format!("{}\n", json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"action": "decline"}})));
+                        out.push(UiEvent::Notice { text: format!("The {} tool asked for information Wren can't show yet, so it was declined.", p["serverName"].as_str().unwrap_or("MCP")) });
                     }
                     other => {
                         self.replies.push(format!(
@@ -1186,6 +1284,50 @@ mod tests {
         let g = Provider::Antigravity.args(Permission::Manual, None, None, None, Some(Mode::Research));
         assert!(!g.contains(&"--effort".to_string()));
         assert!(Mode::Study.wrap_message("why?").ends_with("</wren_mode>\n\nwhy?"));
+    }
+
+    #[test]
+    fn visualize_mode_and_browser_tool() {
+        let c = Provider::Claude.args(Permission::Manual, None, None, None, Some(Mode::Visualize));
+        assert!(c.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == VISUALIZE_PROMPT));
+        assert!(VISUALIZE_PROMPT.contains("visuals/"));
+        let x = Provider::Codex.args(Permission::Manual, None, None, None, Some(Mode::Visualize));
+        let d = x.iter().find(|a| a.starts_with("developer_instructions=")).unwrap();
+        let v: String = serde_json::from_str(d.trim_start_matches("developer_instructions=")).unwrap();
+        assert_eq!(v, VISUALIZE_PROMPT);
+        assert!(!x.contains(&"web_search=\"live\"".to_string()));
+
+        // Claude: the MCP server for this session only.
+        let b = Provider::Claude.browser_args("/bin/npx", "/tmp/out", Permission::Manual);
+        assert_eq!(b[0], "--mcp-config");
+        let cfg: Value = serde_json::from_str(&b[1]).unwrap();
+        let srv = &cfg["mcpServers"][BROWSER_SERVER];
+        assert_eq!(srv["command"], "/bin/npx");
+        assert_eq!(srv["args"], json!(["-y", PLAYWRIGHT_MCP, "--isolated", "--output-dir", "/tmp/out"]));
+        assert_eq!(b.len(), 2, "Manual asks for each browser action");
+        let auto = Provider::Claude.browser_args("/bin/npx", "/tmp/out", Permission::Auto);
+        let allowed = &auto[3];
+        assert!(allowed.contains("mcp__wren_browser__browser_navigate"));
+        assert!(!allowed.contains("run_code_unsafe") && !allowed.contains("file_upload"), "never pre-allowed");
+        // Codex: TOML -c overrides that parse back.
+        let x = Provider::Codex.browser_args("/bin/npx", "/tmp/out", Permission::Manual);
+        assert_eq!(x[1], "mcp_servers.wren_browser.command=\"/bin/npx\"");
+        let args: Vec<String> = serde_json::from_str(x[3].trim_start_matches("mcp_servers.wren_browser.args=")).unwrap();
+        assert_eq!(args[1], PLAYWRIGHT_MCP);
+        assert!(Provider::Antigravity.browser_args("/bin/npx", "/tmp/out", Permission::Auto).is_empty());
+    }
+
+    #[test]
+    fn codex_mcp_tool_approval_becomes_a_card() {
+        let (mut p, _) = parser(Provider::Codex);
+        let ev = p.parse(r#"{"id":21,"method":"mcpServer/elicitation/request","params":{"serverName":"wren_browser","threadId":"t","mode":"form","message":"Allow the wren_browser MCP server to run tool \"browser_navigate\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"browser_navigate","tool_params":{"url":"https://example.com"}}}}"#);
+        assert!(matches!(&ev[0], UiEvent::Approval { id, tool, title, allow_session: false, .. } if id == "codex-21" && tool == "Browser" && title == "browser_navigate: https://example.com"));
+        assert!(p.take_replies().is_empty(), "waits for the user");
+        // A real form from some other MCP server is declined, never left waiting.
+        let ev = p.parse(r#"{"id":22,"method":"mcpServer/elicitation/request","params":{"serverName":"x","threadId":"t","mode":"form","message":"Name?","requestedSchema":{"type":"object","properties":{"n":{"type":"string"}}}}}"#);
+        assert!(matches!(&ev[0], UiEvent::Notice { .. }));
+        let v: Value = serde_json::from_str(p.take_replies()[0].trim()).unwrap();
+        assert_eq!(v["result"]["action"], "decline");
     }
 
     #[test]

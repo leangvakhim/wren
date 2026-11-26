@@ -5169,6 +5169,9 @@ version = "0.1.4"
 dependencies = [
  "base64 0.23.1",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "portable-pty",
  "regex",
  "serde",

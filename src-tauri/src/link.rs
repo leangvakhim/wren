@@ -31,6 +31,9 @@ pub enum Pending {
     ClaudeQuestion { request_id: String, input: Value },
     /// Codex app-server `item/tool/requestUserInput`.
     CodexQuestion { rpc_id: Value },
+    /// Codex asking to run an MCP tool (e.g. the browser tool): an
+    /// `mcpServer/elicitation/request` with `codex_approval_kind` = "mcp_tool_call".
+    CodexMcpTool { rpc_id: Value },
 }
 
 /// The user's answers on a question form, by question id. `None` = skipped.
@@ -123,6 +126,11 @@ pub fn reply(p: &Pending, d: Decision) -> String {
             };
             json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"decision": decision}})
         }
+        // "For this chat" isn't offered (Codex's way to remember it isn't documented).
+        Pending::CodexMcpTool { rpc_id } => match d {
+            Decision::Allow | Decision::AllowSession => json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"action": "accept", "content": {}}}),
+            Decision::Deny => json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"action": "decline"}}),
+        },
         // A question form answered with an approval button: treat as skipped.
         Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. } => {
             return reply_answers(p, &None).unwrap_or_default();
@@ -194,5 +202,10 @@ mod tests {
         assert_eq!(v["result"]["decision"], "accept", "never a permanent rule");
         let v: Value = serde_json::from_str(reply(&p, Decision::Deny).trim()).unwrap();
         assert_eq!(v["result"]["decision"], "decline");
+        let mcp = Pending::CodexMcpTool { rpc_id: json!(9) };
+        let v: Value = serde_json::from_str(reply(&mcp, Decision::Allow).trim()).unwrap();
+        assert_eq!((v["id"].clone(), v["result"]["action"].clone()), (json!(9), json!("accept")));
+        let v: Value = serde_json::from_str(reply(&mcp, Decision::Deny).trim()).unwrap();
+        assert_eq!(v["result"]["action"], "decline");
     }
 }

@@ -1,3 +1,67 @@
+// Wren's own commands. Listing them turns on Tauri's command allowlist: a
+// command can only be called from a webview whose capability allows it, and
+// only Wren's main view has one (capabilities/default.json). The browser
+// panel's webview gets nothing. Keep in sync with `generate_handler!` in
+// src/lib.rs (a test checks).
+const COMMANDS: &[&str] = &[
+    "open_pane",
+    "update_pane",
+    "send_message",
+    "attach_bytes",
+    "attach_file",
+    "attachment_preview",
+    "set_model",
+    "set_mode",
+    "set_github",
+    "set_ai_browser",
+    "browser_open",
+    "browser_place",
+    "browser_go",
+    "browser_close",
+    "open_external",
+    "visual_url",
+    "recent_visuals",
+    "answer_approval",
+    "answer_question",
+    "carry_session",
+    "set_permission",
+    "save_report",
+    "plan_limits",
+    "resume_conversation",
+    "list_models",
+    "list_conversations",
+    "get_conversation",
+    "save_conversation",
+    "delete_conversation",
+    "rename_conversation",
+    "usage_records",
+    "new_conversation",
+    "stop_pane",
+    "close_pane",
+    "detect_clis",
+    "default_folder",
+    "data_folder",
+    "list_accounts",
+    "add_account",
+    "rename_account",
+    "remove_account",
+    "check_account",
+    "set_active_antigravity",
+    "start_login",
+    "login_input",
+    "login_resize",
+    "cancel_login",
+    "github_cli",
+    "list_github",
+    "add_github",
+    "rename_github",
+    "check_github",
+    "remove_github",
+    "start_github_login",
+    "reset_wren",
+];
+
 fn main() {
-    tauri_build::build()
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)))
+        .expect("failed to run tauri-build");
 }

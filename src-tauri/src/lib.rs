@@ -1,5 +1,6 @@
 mod accounts;
 mod attachments;
+mod browser;
 mod events;
 mod github;
 mod handoff;
@@ -116,6 +117,63 @@ fn answer_question(state: State<'_, Manager>, pane_id: String, id: String, answe
 #[tauri::command]
 fn set_permission(state: State<'_, Manager>, pane_id: String, permission: Permission) -> Result<(), String> {
     state.set_permission(&pane_id, permission)
+}
+
+/// "Browser for the AI" on or off; the conversation continues.
+#[tauri::command]
+fn set_ai_browser(state: State<'_, Manager>, pane_id: String, on: bool) -> Result<(), String> {
+    state.set_ai_browser(&pane_id, on)
+}
+
+// ---------------- browser panel ----------------
+
+/// Open an address in the pane's browser panel at the given box (CSS pixels
+/// of Wren's window). Returns the address actually opened.
+#[tauri::command]
+async fn browser_open(
+    app: tauri::AppHandle,
+    panels: State<'_, browser::Panels>,
+    pane_id: String,
+    url: String,
+    bounds: browser::Bounds,
+    on_event: Channel<browser::BrowserEvent>,
+) -> Result<String, String> {
+    panels.open(&app, &pane_id, &url, bounds, on_event)
+}
+
+/// Move, resize, show or hide the pane's browser panel.
+#[tauri::command]
+async fn browser_place(app: tauri::AppHandle, panels: State<'_, browser::Panels>, pane_id: String, bounds: browser::Bounds, visible: bool) -> Result<(), String> {
+    panels.place(&app, &pane_id, bounds, visible)
+}
+
+/// back | forward | reload | stop
+#[tauri::command]
+async fn browser_go(app: tauri::AppHandle, panels: State<'_, browser::Panels>, pane_id: String, action: String) -> Result<(), String> {
+    panels.go(&app, &pane_id, &action)
+}
+
+#[tauri::command]
+async fn browser_close(app: tauri::AppHandle, panels: State<'_, browser::Panels>, pane_id: String) -> Result<(), String> {
+    panels.close(&app, &pane_id)
+}
+
+/// Open a web address in the computer's normal browser.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    browser::open_external(&url)
+}
+
+/// The panel address of a page in the project (e.g. visuals/quicksort.html).
+#[tauri::command]
+async fn visual_url(visuals: State<'_, browser::Visuals>, cwd: String, path: String) -> Result<String, String> {
+    visuals.url_for(&cwd, &path).await
+}
+
+/// Pages in <cwd>/visuals changed since `since` (ms), newest first.
+#[tauri::command]
+fn recent_visuals(cwd: String, since: u64) -> Vec<String> {
+    browser::recent_visuals(&cwd, since)
 }
 
 /// Deep research: save the final report into the project folder.
@@ -436,6 +494,10 @@ async fn reset_wren(app: tauri::AppHandle) -> Result<(), String> {
     for (env, login) in gh_sign_outs {
         let _ = github::sign_out(&env, login.as_deref()).await;
     }
+    // The browser panel's cookies and site data live in the webview's store.
+    if let Some(main) = app.get_webview("main") {
+        let _ = main.clear_all_browsing_data();
+    }
     let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     // Only ever Wren's own folder (named after the app id).
     if data.file_name().and_then(|n| n.to_str()) != Some(app.config().identifier.as_str()) {
@@ -528,6 +590,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Manager::default())
         .manage(LoginManager::default())
+        .manage(browser::Panels::default())
+        .manage(browser::Visuals::default())
         .setup(|app| {
             // In-app updates: checks the latest GitHub release (signed with the owner's key).
             #[cfg(desktop)]
@@ -538,6 +602,7 @@ pub fn run() {
             app.manage(History::load(&data));
             let store = attachments::Store::new(&data);
             app.state::<Manager>().set_attach_dir(store.dir().to_string_lossy().to_string());
+            app.state::<Manager>().set_browser_dir(data.join("browser-ai").to_string_lossy().to_string());
             app.manage(store);
             Ok(())
         })
@@ -551,6 +616,14 @@ pub fn run() {
             set_model,
             set_mode,
             set_github,
+            set_ai_browser,
+            browser_open,
+            browser_place,
+            browser_go,
+            browser_close,
+            open_external,
+            visual_url,
+            recent_visuals,
             answer_approval,
             answer_question,
             carry_session,
@@ -603,6 +676,42 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// build.rs's command allowlist, the capability and `generate_handler!`
+    /// must list the same commands (else a command silently stops working,
+    /// or the browser panel's isolation has a hole).
+    #[test]
+    fn command_lists_match() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let read = |f: &str| std::fs::read_to_string(format!("{root}/{f}")).unwrap();
+        let build = read("build.rs");
+        let mut in_build: Vec<String> = build
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('"').and_then(|l| l.strip_suffix("\",")).map(String::from))
+            .collect();
+        let lib = read("src/lib.rs");
+        let start = lib.find("generate_handler![").unwrap();
+        let end = start + lib[start..].find(']').unwrap();
+        let mut in_lib: Vec<String> = lib[start + "generate_handler![".len()..end]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let cap: serde_json::Value = serde_json::from_str(&read("capabilities/default.json")).unwrap();
+        assert_eq!(cap["webviews"], serde_json::json!(["main"]), "only the main view may call Wren");
+        assert!(cap.get("windows").is_none(), "a window match would include the browser panel");
+        let mut in_cap: Vec<String> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str()?.strip_prefix("allow-").map(|c| c.replace('-', "_")))
+            .collect();
+        in_build.sort();
+        in_lib.sort();
+        in_cap.sort();
+        assert_eq!(in_build, in_lib);
+        assert_eq!(in_cap, in_lib);
+    }
+
     #[test]
     fn percent_decoding() {
         assert_eq!(super::percent_decode("sales%20Q3.xlsx"), "sales Q3.xlsx");

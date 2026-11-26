@@ -18,11 +18,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# "unstable" = several webviews in one window (the browser panel).
+tauri = { version = "2", features = ["unstable"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
-tokio = { version = "1.54.1", features = ["process", "io-util", "sync", "macros", "rt", "time"] }
+tokio = { version = "1.54.1", features = ["process", "io-util", "sync", "macros", "rt", "time", "net"] }
 which = "8.0.6"
 portable-pty = "0.9.0"
 base64 = "0.23.1"
@@ -39,6 +40,12 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# macOS: place the browser panel exactly (same versions wry already uses).
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"

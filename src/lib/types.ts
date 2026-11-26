@@ -23,10 +23,12 @@ export interface PaneConfig {
   mode?: Mode | null;
   /** GitHub account gh and git use in this pane ('' = the computer's normal setup). */
   githubAccountId?: string;
+  /** "Browser for the AI": the CLI gets a browser tool (Playwright MCP) in this pane. */
+  aiBrowser?: boolean;
 }
 
-/** Study / Deep research (see the "+" menu in the message box). */
-export type Mode = 'study' | 'research';
+/** Study / Deep research / Visualize (see the "+" menu in the message box). */
+export type Mode = 'study' | 'research' | 'visualize';
 
 export const MODES: Record<Mode, { label: string; hint: string }> = {
   study: { label: 'Study', hint: 'Tutor mode: explains step by step, gives hints before answers and checks your understanding.' },
@@ -34,7 +36,18 @@ export const MODES: Record<Mode, { label: string; hint: string }> = {
     label: 'Deep research',
     hint: 'Searches the web widely, checks sources against each other and writes a cited report (saved in the folder). Uses more of your plan.',
   },
+  visualize: {
+    label: 'Visualize',
+    hint: 'Explains with an interactive animation (play, step, change the input), saved in visuals/ and opened in the browser panel.',
+  },
 };
+
+/** Events from a pane's browser panel (see src-tauri/src/browser.rs). */
+export type BrowserEvent =
+  | { kind: 'loading'; url: string }
+  | { kind: 'loaded'; url: string }
+  | { kind: 'title'; title: string }
+  | { kind: 'blocked'; url: string; reason: string };
 
 /** A file attached in Wren (a private copy in Wren's data folder). */
 export interface Attachment {
@@ -194,7 +207,8 @@ export type UiEvent =
 export interface Msg {
   id: number;
   /** notice = something Wren handled for you this turn ('details' = old raw logs, no longer shown). */
-  role: 'user' | 'assistant' | 'tool' | 'error' | 'info' | 'notice' | 'details' | 'approval' | 'question' | 'divider';
+  /** visual = a page the AI made (`detail` = its path), opened in the browser panel. */
+  role: 'user' | 'assistant' | 'tool' | 'error' | 'info' | 'notice' | 'details' | 'approval' | 'question' | 'divider' | 'visual';
   text: string;
   /** Tool calls: the command/file/query. */
   detail?: string;
@@ -247,4 +261,4 @@ export const PERMISSIONS: { value: Permission; label: string; hint: string }[] =
 
 export const defaultAccountId = (p: Provider) => `default-${PROVIDERS[p].bin}`;
 
-export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: '', model: '', effort: '', mode: null, githubAccountId: '' };
+export const DEFAULT_CONFIG: PaneConfig = { provider: 'claude', cwd: '', permission: 'manual', accountId: '', model: '', effort: '', mode: null, githubAccountId: '', aiBrowser: false };

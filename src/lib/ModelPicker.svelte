@@ -85,7 +85,7 @@
   </button>
 
   {#if open}
-    <div class="pop" role="dialog" aria-label="Choose model and effort" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && (open = false)}>
+    <div class="pop" data-overlay role="dialog" aria-label="Choose model and effort" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && (open = false)}>
       <div class="section">Model</div>
       <button class="row" class:sel={!model} onclick={() => pickModel('')}>
         <span class="name">Default</span><span class="desc">{defaultNote}</span>
