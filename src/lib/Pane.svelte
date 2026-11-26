@@ -179,6 +179,8 @@
   /** The conversation moved to another AI that hasn't been told about it yet:
    *  the next message carries a recap (label of the AI it came from). */
   let recapFrom: string | null = null;
+  /** The project folder changed during the chat; the next message tells the AI. */
+  let folderMoved: { from: string; to: string } | null = null;
 
   function markApplied() {
     appliedAccount = config.accountId;
@@ -982,10 +984,26 @@
       title: 'Choose a project folder',
       defaultPath: config.cwd || defaultFolder || undefined,
     });
-    if (typeof dir === 'string' && dir !== config.cwd) {
-      config.cwd = dir;
+    if (typeof dir !== 'string' || dir === config.cwd) return;
+    const from = config.cwd;
+    config.cwd = dir;
+    if (!opened || !convId || !messages.some((m) => m.role === 'user')) {
       await applyConfig(`Folder set to ${dir}`);
+      return;
     }
+    // A chat is going on: it continues in the new folder.
+    try {
+      await invoke('set_folder', { paneId, cwd: dir });
+    } catch (e) {
+      config.cwd = from;
+      push({ role: 'error', text: String(e) });
+      return;
+    }
+    folderMoved = { from: folderMoved?.from ?? from, to: dir };
+    if (folderMoved.from === dir) folderMoved = null;
+    push({ role: 'divider', text: `Folder changed to ${folderName}` });
+    persist();
+    scrollToEnd(true);
   }
 
   async function applyConfig(note: string) {
@@ -1003,6 +1021,7 @@
   function resetView() {
     forgetConversation();
     recapFrom = null;
+    folderMoved = null;
     messages = [];
     busy = false;
     reportedModel = null;
@@ -1100,6 +1119,7 @@
       config.mode = conv.mode ?? null;
       await invoke('resume_conversation', { paneId, config: $state.snapshot(config), sessionId: conv.sessionId });
       markApplied();
+      folderMoved = null;
       busy = false;
       streamingId = null;
       limitHit = false;
@@ -1216,9 +1236,16 @@
     clearInterval(tickTimer);
     tickTimer = setInterval(() => (tickNow = Date.now()), 1000);
     scrollToTurn();
+    // The folder changed since the last message: the AI learns it with this one.
+    const moved = folderMoved;
+    folderMoved = null;
+    if (moved) {
+      cliText = `(Note from Wren: the project folder for this conversation is now ${moved.to}. Earlier messages and file paths refer to ${moved.from}. Work in the new folder from now on.)\n\n${cliText}`;
+    }
     try {
       await invoke('send_message', { paneId, text: cliText, files: files.map((f) => f.path) });
     } catch (e) {
+      folderMoved = moved;
       busy = false;
       endTurn();
       push({ role: 'error', text: String(e) });

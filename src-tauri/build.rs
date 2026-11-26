@@ -14,6 +14,7 @@ const COMMANDS: &[&str] = &[
     "set_mode",
     "set_github",
     "set_ai_browser",
+    "set_folder",
     "browser_open",
     "browser_place",
     "browser_go",

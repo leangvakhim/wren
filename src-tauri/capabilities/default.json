@@ -21,6 +21,7 @@
     "allow-set-mode",
     "allow-set-github",
     "allow-set-ai-browser",
+    "allow-set-folder",
     "allow-browser-open",
     "allow-browser-place",
     "allow-browser-go",

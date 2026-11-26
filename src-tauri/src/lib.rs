@@ -125,6 +125,12 @@ fn set_ai_browser(state: State<'_, Manager>, pane_id: String, on: bool) -> Resul
     state.set_ai_browser(&pane_id, on)
 }
 
+/// Another project folder; the conversation continues.
+#[tauri::command]
+fn set_folder(state: State<'_, Manager>, pane_id: String, cwd: String) -> Result<(), String> {
+    state.set_folder(&pane_id, cwd)
+}
+
 // ---------------- browser panel ----------------
 
 /// Open an address in the pane's browser panel at the given box (CSS pixels
@@ -617,6 +623,7 @@ pub fn run() {
             set_mode,
             set_github,
             set_ai_browser,
+            set_folder,
             browser_open,
             browser_place,
             browser_go,

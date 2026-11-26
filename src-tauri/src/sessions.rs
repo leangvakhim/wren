@@ -264,6 +264,18 @@ impl Manager {
         Ok(())
     }
 
+    /// Move the pane to another project folder WITHOUT losing the
+    /// conversation: the CLI restarts there and resumes the same session
+    /// (Claude finds a session saved under another folder by its id; Codex
+    /// gets the new cwd in `thread/resume`).
+    pub fn set_folder(&self, pane_id: &str, cwd: String) -> Result<(), String> {
+        let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get_mut(pane_id).ok_or("unknown pane")?;
+        s.kill();
+        s.cfg.cwd = cwd;
+        Ok(())
+    }
+
     /// Turn "Browser for the AI" on or off WITHOUT losing the conversation.
     pub fn set_ai_browser(&self, pane_id: &str, on: bool) -> Result<(), String> {
         let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
@@ -601,6 +613,36 @@ mod tests {
             Ok(())
         });
         (events, channel)
+    }
+
+    #[test]
+    /// Another folder keeps the conversation (the next start resumes the same
+    /// session there); `update` (another AI) forgets it.
+    fn set_folder_keeps_the_session() {
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: "/tmp/a".into(),
+            permission: Permission::Manual,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+            github_account_id: None,
+            ai_browser: false,
+        };
+        let m = Manager::default();
+        let (_events, ch) = collector();
+        m.open("p".into(), cfg.clone(), Ok(vec![]), ch).unwrap();
+        m.resume("p", cfg.clone(), Ok(vec![]), Some("s-1".into())).unwrap();
+        m.set_folder("p", "/tmp/b".into()).unwrap();
+        {
+            let map = m.sessions.lock().unwrap();
+            let s = map.get("p").unwrap();
+            assert_eq!(s.cfg.cwd, "/tmp/b");
+            assert_eq!(s.provider_session.lock().unwrap().as_deref(), Some("s-1"));
+        }
+        m.update("p", cfg, Ok(vec![])).unwrap();
+        assert!(m.sessions.lock().unwrap().get("p").unwrap().provider_session.lock().unwrap().is_none());
     }
 
     #[test]
