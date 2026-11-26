@@ -87,18 +87,27 @@ export function parseResetTime(text: string, now: Date = new Date()): Date | nul
   return null;
 }
 
-/** A short recap of a conversation, to carry over to another AI. */
+/** Bubbles that show a recap Wren sent (not something the user wrote). */
+export const isRecapBubble = (text: string) => text.startsWith('(Recap');
+
+/**
+ * A short recap of a conversation, to carry over to another AI.
+ * `why`: 'limit' = the old AI ran out of usage, continue `lastRequest` now;
+ * 'switch' = the user moved the conversation, the new AI just reads it.
+ */
 export function buildRecap(
   messages: { role: string; text: string }[],
   lastRequest: string,
   fromLabel: string,
   maxChars = 8000,
+  why: 'limit' | 'switch' = 'limit',
 ): string {
   const lines: string[] = [];
   let used = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role !== 'user' && m.role !== 'assistant') continue;
+    if (m.role === 'user' && isRecapBubble(m.text)) continue;
     const line = `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text.trim()}`;
     if (used + line.length > maxChars) {
       lines.unshift('(earlier messages left out)');
@@ -107,16 +116,17 @@ export function buildRecap(
     lines.unshift(line);
     used += line.length;
   }
-  return [
-    `I was working on this with ${fromLabel}, which has run out of usage. Here is the conversation so far:`,
-    '',
-    '---',
-    ...lines,
-    '---',
-    '',
-    'Please continue from here. My latest request was:',
-    lastRequest,
-  ].join('\n');
+  const intro =
+    why === 'limit'
+      ? `I was working on this with ${fromLabel}, which has run out of usage. Here is the conversation so far:`
+      : `I was working on this with ${fromLabel} and have moved the conversation to you. Here is the conversation so far:`;
+  const outro =
+    why === 'limit'
+      ? ['Please continue from here. My latest request was:', lastRequest]
+      : lastRequest
+        ? ['Please continue from here. My new message is:', lastRequest]
+        : ["Please read it and reply in one or two sentences that you're ready to continue. Don't start any work until I ask."];
+  return [intro, '', '---', ...lines, '---', '', ...outro].join('\n');
 }
 
 export function formatWait(ms: number): string {

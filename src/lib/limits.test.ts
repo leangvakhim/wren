@@ -42,6 +42,22 @@ const recap = buildRecap(
 );
 assert.ok(recap.includes('Claude Code'));
 assert.ok(recap.includes('(earlier messages left out)'));
+// A manual switch: the new AI only reads the conversation; earlier recaps are left out.
+const moved = buildRecap(
+  [
+    { role: 'user', text: 'make a todo app' },
+    { role: 'user', text: '(Recap of the conversation so far, sent to Codex)' },
+    { role: 'assistant', text: 'done' },
+  ],
+  '',
+  'Claude Code',
+  8000,
+  'switch',
+);
+assert.ok(moved.includes('moved the conversation to you'));
+assert.ok(!moved.includes('(Recap'));
+assert.ok(moved.includes("Don't start any work"));
+assert.ok(buildRecap([], 'next step', 'Codex', 8000, 'switch').endsWith('My new message is:\nnext step'));
 assert.ok(recap.includes('Assistant: answer'));
 assert.ok(!recap.includes('shell'));
 assert.ok(recap.trim().endsWith('fix the bug'));

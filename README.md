@@ -7,7 +7,54 @@ Built with **Tauri 2** (Rust backend) and **Svelte 5** (UI). Wren runs the
 official, unmodified CLIs on your computer in their headless JSON modes and
 shows their output as chat bubbles. It never reads or stores your login tokens.
 
-## Prerequisites (macOS)
+## Install Wren (for users)
+
+1. **Install the AI CLIs you want to use** (any of them; you sign in later, from Wren):
+   - Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`
+     (Windows PowerShell: `irm https://claude.ai/install.ps1 | iex`)
+   - Codex: `npm install -g @openai/codex` (needs Node.js: <https://nodejs.org>)
+   - Antigravity CLI: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+2. **Download Wren** from the latest release:
+   <https://github.com/leangvakhim/wren/releases/latest>
+
+   | Your computer | File |
+   |---|---|
+   | Mac with Apple Silicon (M1 or newer) | `Wren_<version>_aarch64.dmg` |
+   | Mac with Intel | `Wren_<version>_x64.dmg` |
+   | Windows 10/11 | `Wren_<version>_x64-setup.exe` (or the `.msi`) |
+   | Linux, any distro | `Wren_<version>_amd64.AppImage` |
+   | Debian / Ubuntu | `Wren_<version>_amd64.deb` |
+   | Fedora / openSUSE | `Wren-<version>-1.x86_64.rpm` |
+
+   Not sure which Mac you have? Apple menu → About This Mac: "Chip: Apple M…" = Apple Silicon,
+   "Processor: Intel" = Intel.
+3. **Install and open it**
+   - **macOS**: open the `.dmg` and drag **Wren** into **Applications**. Wren isn't
+     notarized by Apple (it's built without a paid Apple Developer ID), so the first time macOS
+     says it can't be opened: click **Done**, go to **System Settings → Privacy &
+     Security**, scroll down and click **Open Anyway** next to "Wren", then
+     **Open Anyway** again. You only do this once.
+   - **Windows**: run the setup file. If **"Windows protected your PC"** appears,
+     click **More info → Run anyway** (once).
+   - **Linux**: AppImage: `chmod +x Wren_*.AppImage && ./Wren_*.AppImage`.
+     Debian/Ubuntu: `sudo apt install ./Wren_*.deb`. Fedora: `sudo dnf install ./Wren-*.rpm`.
+4. **First start**: Wren starts empty. Click **Accounts**, add an account for an AI
+   and click **Sign in** (or **Use this computer's login** if you already signed in to
+   that CLI in a terminal). Then pick a project folder with the folder chip in the
+   message box and start chatting.
+
+Updates come by themselves: when a new version is out, an **Update available**
+button appears in the top bar. Your accounts and conversations stay on your
+computer and are kept across updates.
+
+**Remove Wren**: delete the app (macOS: drag it from Applications to the Trash;
+Windows: Settings → Apps → Wren → Uninstall). To also remove Wren's accounts list
+and conversations first, use **Settings → Reset Wren**. Your CLIs and their own
+logins are not touched.
+
+## Build from source
+
+### Prerequisites (macOS)
 
 1. **Xcode Command Line Tools**: `xcode-select --install`
 2. **Rust**: <https://rustup.rs> (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
@@ -20,14 +67,14 @@ shows their output as chat bubbles. It never reads or stores your login tokens.
 Windows and Linux work too. See the Tauri prerequisites:
 <https://tauri.app/start/prerequisites/>.
 
-## Run
+### Run
 
 ```bash
 npm install
 npm run tauri dev      # opens the Wren window, reloads as you edit
 ```
 
-## Build an installer
+### Build an installer
 
 ```bash
 # Builds also make signed update files, so they need your update key (see "Updates" below):
@@ -85,13 +132,27 @@ Copies of 0.1.0 have no updater: install 0.1.1 by hand once.
     several can be used at the same time.
   - Antigravity keeps one Google login per computer: one account is *active*
     at a time; signing in to another makes it the active one.
-  - Each AI also has a **Default** account = the login you made in a terminal.
+  - **Use this computer's login** adds the login you already made in a terminal.
 - Each pane has its own **AI**, **account**, **project folder** and **permission**.
   The folder is the chip in the message box (click to change). New panes start
   in **~/Desktop** on macOS and your **home folder** on Windows/Linux.
-- If an account hits its usage limit, the pane offers your other accounts.
-  You choose; Wren never switches by itself. Switching starts a new
-  conversation, because the old one belongs to the other account.
+- **Switching account or AI keeps the conversation.** Pick another account or AI in
+  the pane's menus (when it isn't working) and the chat simply goes on; a line like
+  "Continued with Claude Code · Work" marks the change.
+  - *Same AI, another account* (Claude Code, Codex): Wren copies the AI's own saved
+    conversation into the other account's private folder and continues it there, so
+    the AI remembers everything (files read, commands run). Nothing is sent until you
+    write your next message.
+  - *Another AI*: it gets a recap of the chat right away (your messages, its answers
+    and your answers to its questions) and replies that it's ready. If that AI has no
+    account yet, the recap goes with your next message instead.
+- If an account hits its usage limit, the pane offers your other accounts:
+  **Switch and continue** moves the conversation as above and sends your last
+  message again. You choose; Wren never switches between accounts by itself.
+- **Questions from the AI** appear as a clickable form: pick an option (or several
+  when it says "Choose any"), or type your own answer, then **Submit**. **Skip** lets
+  the AI go on without your answers. Afterwards the card shows what you answered.
+  Claude Code asks this way often; Codex only in its own planning mode.
 - **Permission** (per pane, like Claude Desktop's Manual / Auto). Changing it keeps the conversation.
   - *Manual* (default): before the AI edits files or runs a command, a card appears in the
     chat with **Allow**, **Allow for this chat** and **Deny**. In Plan, Claude asks with
@@ -179,6 +240,8 @@ src-tauri/src/
   sessions.rs        up to 4 CLI processes, stop/resume/new (with end-to-end test)
   accounts.rs        accounts per AI, private login folders, status/sign-out (with tests)
   login.rs           sign-in terminal (PTY) + link finder (with tests)
+  handoff.rs         moving a conversation to another account of the same AI (with tests)
+  link.rs            approval cards and question forms the CLI waits on (with tests)
   limits.rs          plan limits (5-hour / weekly / daily) read from each CLI (with tests)
   reports.rs         Deep research reports saved to <project>/research/ (with tests)
   models.rs          model + effort lists per AI (with tests)

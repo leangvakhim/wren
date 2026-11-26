@@ -1,6 +1,7 @@
 mod accounts;
 mod attachments;
 mod events;
+mod handoff;
 mod history;
 mod limits;
 mod link;
@@ -77,6 +78,12 @@ fn answer_approval(state: State<'_, Manager>, pane_id: String, id: String, decis
     state.answer(&pane_id, &id, decision)
 }
 
+/// The user answered a question form (`answers` = null when skipped).
+#[tauri::command]
+fn answer_question(state: State<'_, Manager>, pane_id: String, id: String, answers: link::Answers) -> Result<(), String> {
+    state.answer_question(&pane_id, &id, answers)
+}
+
 /// Change Manual / Auto / Plan / Full access; the conversation continues.
 #[tauri::command]
 fn set_permission(state: State<'_, Manager>, pane_id: String, permission: Permission) -> Result<(), String> {
@@ -112,6 +119,25 @@ fn resume_conversation(
 ) -> Result<(), String> {
     let env = account_env(&store, &config);
     state.resume(&pane_id, config, env, session_id)
+}
+
+/// Continue a conversation with another account of the same AI: copy the
+/// CLI's saved conversation into that account's folder. `false` = the CLI has
+/// no saved copy (Wren then sends a recap instead).
+#[tauri::command]
+fn carry_session(store: State<'_, AccountStore>, from_account: String, to_account: String, session_id: String) -> Result<bool, String> {
+    let from = store.get(&from_account)?;
+    let to = store.get(&to_account)?;
+    if from.provider != to.provider {
+        return Err("Both accounts must belong to the same AI.".into());
+    }
+    if from.provider == Provider::Antigravity {
+        return Ok(false);
+    }
+    let (Some(src), Some(dst)) = (handoff::cli_home(from.provider, store.dir_for(&from)), handoff::cli_home(to.provider, store.dir_for(&to))) else {
+        return Ok(false);
+    };
+    handoff::copy_session(from.provider, &src, &dst, &session_id)
 }
 
 /// Models and effort tiers this AI offers (asked from the CLI where possible).
@@ -416,6 +442,8 @@ pub fn run() {
             set_model,
             set_mode,
             answer_approval,
+            answer_question,
+            carry_session,
             set_permission,
             save_report,
             plan_limits,

@@ -6,12 +6,13 @@
   import PeckingWren from './PeckingWren.svelte';
   import ModelPicker from './ModelPicker.svelte';
   import ModeMenu from './ModeMenu.svelte';
+  import QuestionCard from './QuestionCard.svelte';
   import { applyLimitEvent, dismissedWarnings, levelOf, planLimits, refreshLimits, resetText, usedNow } from './planLimits.svelte';
   import { estimateCost } from './pricing';
   import { getConversation, saveConversation } from './history.svelte';
   import { modelLists, modelName, modelsKey } from './models.svelte';
   import { settings } from './settings.svelte';
-  import { buildRecap, formatWait, isLimitMessage, parseResetTime } from './limits';
+  import { buildRecap, formatWait, isLimitMessage, isRecapBubble, parseResetTime } from './limits';
   import { renderMarkdown } from './markdown';
   import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
   import { MODES, PROVIDERS, PERMISSIONS, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
@@ -171,6 +172,16 @@
   let opened = $state(false);
   /** The account the CLI process was last started with (the pane's menu can change later, e.g. when the first account is added). */
   let appliedAccount: string | null = null;
+  /** The AI the CLI process was last started with. */
+  let appliedProvider: Provider = config.provider;
+  /** The conversation moved to another AI that hasn't been told about it yet:
+   *  the next message carries a recap (label of the AI it came from). */
+  let recapFrom: string | null = null;
+
+  function markApplied() {
+    appliedAccount = config.accountId;
+    appliedProvider = config.provider;
+  }
   let limitHit = $state(false);
   let switchTo = $state('');
 
@@ -234,6 +245,7 @@
 
   const BIRD_WORDS = ['Pecking', 'Foraging', 'Figuring', 'Nesting', 'Preening', 'Scouting', 'Hopping', 'Fluttering', 'Gathering twigs'];
   const verb = $derived.by(() => {
+    if (waitingQuestion) return 'Waiting for your answer';
     if (waitingApproval) return 'Waiting for your approval';
     if (thinking) return 'Thinking';
     const sec = Math.floor((tickNow - turnStartedAt) / 1000);
@@ -266,7 +278,8 @@
   }
 
   /** Approval cards still waiting for the user. */
-  const waitingApproval = $derived(messages.some((m) => m.role === 'approval' && m.approvalState === 'waiting'));
+  const waitingApproval = $derived(messages.some((m) => (m.role === 'approval' && m.approvalState === 'waiting') || (m.role === 'question' && m.questionState === 'waiting')));
+  const waitingQuestion = $derived(messages.some((m) => m.role === 'question' && m.questionState === 'waiting'));
   /** Antigravity "Allow & retry": the permission to go back to after the retried turn. */
   let revertPermission: string | null = null;
   /** One "refused" card per turn is enough. */
@@ -283,9 +296,34 @@
     push({ role: 'approval', tool: 'Antigravity', text: lastToolSummary || 'An action that needs your permission', detail: text.slice(0, 600), approvalState: 'refused' });
   }
 
-  /** Approval cards the CLI can no longer receive an answer for. */
+  /** Approval cards and question forms the CLI can no longer receive an answer for. */
   function expireApprovals() {
-    for (const m of messages) if (m.role === 'approval' && m.approvalState === 'waiting') m.approvalState = 'expired';
+    for (const m of messages) {
+      if (m.role === 'approval' && m.approvalState === 'waiting') m.approvalState = 'expired';
+      if (m.role === 'question' && m.questionState === 'waiting') m.questionState = 'expired';
+    }
+  }
+
+  /** Saved/reopened conversations: nothing can still be waiting. */
+  function expireSaved(m: Msg): Msg {
+    if (m.approvalState === 'waiting') return { ...m, approvalState: 'expired' };
+    if (m.questionState === 'waiting') return { ...m, questionState: 'expired' };
+    return m;
+  }
+
+  async function answerQuestion(m: Msg, answers: Record<string, string[]> | null) {
+    if (!m.approvalId) return;
+    try {
+      await invoke('answer_question', { paneId, id: m.approvalId, answers });
+      // Secret answers are never kept in the saved conversation.
+      const secret = new Set((m.questions ?? []).filter((q) => q.secret).map((q) => q.id));
+      m.answers = answers ? Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, secret.has(k) ? ['(hidden)'] : v])) : undefined;
+      m.questionState = answers ? 'answered' : 'skipped';
+    } catch (e) {
+      m.questionState = 'expired';
+      push({ role: 'error', text: String(e) });
+    }
+    persist();
   }
 
   async function answerApproval(m: Msg, decision: 'allow' | 'allow_session' | 'deny') {
@@ -402,7 +440,7 @@
       updatedAt: Date.now(),
       messages: $state.snapshot(messages)
         .filter((m) => m.role !== 'details')
-        .map((m) => (m.approvalState === 'waiting' ? { ...m, approvalState: 'expired' as const } : m)),
+        .map(expireSaved),
       totals: $state.snapshot(totals),
       usage: usageLog,
     };
@@ -441,7 +479,7 @@
     showLimitBanner();
   }
 
-  /** Continue in the next AI that is installed and has a usable account. */
+  /** Continue in the next AI that is installed and has a usable account (same conversation). */
   async function switchToOtherAI(): Promise<boolean> {
     const from = config.provider;
     for (const p of settings.fallbackOrder) {
@@ -449,29 +487,96 @@
       const list = accountsFor(p).filter((a) => isUsable(a));
       const acc = list.find((a) => a.is_default) ?? list[0];
       if (!acc) continue;
-      const recap = buildRecap($state.snapshot(messages), lastUserText, PROVIDERS[from].label);
-      const oldTitle = convTitle;
       config.provider = p;
       config.accountId = acc.id;
       config.model = '';
       config.effort = '';
-      try {
-        await invoke('update_pane', { paneId, config: $state.snapshot(config) });
-        appliedAccount = config.accountId;
-      } catch (e) {
-        push({ role: 'error', text: String(e) });
-        return false;
-      }
-      resetView();
-      push({
-        role: 'info',
-        text: `${PROVIDERS[from].label} ran out of usage. Continued automatically in ${PROVIDERS[p].label} with a recap of the conversation.`,
-      });
-      startConversation(`${oldTitle || lastUserText} → ${PROVIDERS[p].label}`);
-      await sendText(recap, `(Recap of the conversation with ${PROVIDERS[from].label})\n\n${lastUserText}`);
-      return true;
+      return continueWith('limit');
     }
     return false;
+  }
+
+  /** The chat as the recap sees it: question forms count as the user's answers. */
+  function recapSource(): { role: string; text: string }[] {
+    return messages.map((m) => {
+      if (m.role !== 'question' || !m.answers) return m;
+      const parts = (m.questions ?? [])
+        .filter((q) => !q.secret && m.answers?.[q.id]?.length)
+        .map((q) => `${q.header || q.question}: ${m.answers![q.id].join(', ')}`);
+      return { role: 'user', text: `(Answered the AI's questions) ${parts.join('; ')}` };
+    });
+  }
+
+  /** "Claude Code · Work" for the pane's current AI and account. */
+  const targetLabel = () => `${PROVIDERS[config.provider].label}${account ? ` · ${account.name}` : ''}`;
+
+  /**
+   * The user picked another account or AI (or the limit handling did): keep
+   * this conversation and go on with the new one.
+   * - Same AI: the CLI's own saved conversation is copied to the new account
+   *   and resumed, so nothing is lost.
+   * - Another AI (or no saved copy): the new AI gets a recap of the chat.
+   * `why` = 'limit': the last request didn't finish, so it's sent again.
+   */
+  async function continueWith(why: 'switch' | 'limit'): Promise<boolean> {
+    const fromProvider = appliedProvider;
+    const fromAccount = appliedAccount;
+    const fromLabel = PROVIDERS[fromProvider].label;
+    if (!opened || !convId || !messages.some((m) => m.role === 'user')) {
+      // Nothing to carry over yet.
+      await applyConfig(config.provider === fromProvider ? `Account: ${account?.name ?? 'none'}` : `Switched to ${PROVIDERS[config.provider].label}`);
+      return true;
+    }
+    limitHit = false;
+    pendingLimit = null;
+    stopWaiting();
+    expireApprovals();
+    const sameAI = config.provider === fromProvider;
+    if (sameAI && sessionId && fromAccount && config.accountId && config.provider !== 'antigravity') {
+      try {
+        const carried = await invoke<boolean>('carry_session', { fromAccount, toAccount: config.accountId, sessionId });
+        if (carried) {
+          await invoke('resume_conversation', { paneId, config: $state.snapshot(config), sessionId });
+          markApplied();
+          recapFrom = null;
+          push({ role: 'divider', text: `Continued with ${targetLabel()}` });
+          persist();
+          if (why === 'limit' && lastUserText) await sendText(lastUserText, lastUserText, lastUserFiles);
+          return true;
+        }
+      } catch (e) {
+        push({ role: 'notice', text: `Couldn't move the saved conversation (${e}). Sending a recap instead.` });
+      }
+    }
+    try {
+      await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+      markApplied();
+    } catch (e) {
+      push({ role: 'error', text: String(e) });
+      return false;
+    }
+    sessionId = null;
+    reportedModel = null;
+    push({
+      role: 'divider',
+      text: why === 'limit' ? `${fromLabel} ran out of usage. Continued with ${targetLabel()}` : `Continued with ${targetLabel()}`,
+    });
+    // A recap still waiting from an earlier move covers this one too.
+    recapFrom = why === 'limit' ? fromLabel : (recapFrom ?? fromLabel);
+    persist();
+    // Without a usable account the recap waits for the next message.
+    if (!account || !isUsable(account) || !installed[config.provider]) {
+      push({ role: 'info', text: `Your next message will include a recap of this conversation for ${PROVIDERS[config.provider].label}.` });
+      return true;
+    }
+    const recap = buildRecap(recapSource(), why === 'limit' ? lastUserText : '', recapFrom, 8000, why);
+    recapFrom = null;
+    await sendText(
+      recap,
+      why === 'limit' ? `(Recap of the conversation with ${fromLabel})\n\n${lastUserText}` : `(Recap of the conversation so far, sent to ${targetLabel()})`,
+      why === 'limit' ? lastUserFiles : [],
+    );
+    return true;
   }
 
   /** Wait until the reset time, then re-send the last message on the same account. */
@@ -527,6 +632,12 @@
         thinking = false;
         streamingId = null;
         push({ role: 'approval', approvalId: ev.id, tool: ev.tool, text: ev.title, detail: ev.detail ?? undefined, approvalState: 'waiting', allowSession: ev.allow_session });
+        scrollToEnd(true);
+        return;
+      case 'question':
+        thinking = false;
+        streamingId = null;
+        push({ role: 'question', approvalId: ev.id, text: '', tool: PROVIDERS[config.provider].label, questions: ev.questions, questionState: 'waiting' });
         scrollToEnd(true);
         return;
       case 'notice':
@@ -702,7 +813,7 @@
     if (!opened) return;
     try {
       await invoke('update_pane', { paneId, config: $state.snapshot(config) });
-      appliedAccount = config.accountId;
+      markApplied();
       resetView();
       push({ role: 'info', text: `${note}. New conversation.` });
     } catch (e) {
@@ -712,6 +823,7 @@
 
   function resetView() {
     forgetConversation();
+    recapFrom = null;
     messages = [];
     busy = false;
     reportedModel = null;
@@ -782,7 +894,7 @@
     config.accountId = bestAccountId(config.provider);
     config.model = '';
     config.effort = '';
-    applyConfig(`Switched to ${PROVIDERS[config.provider].label}`);
+    continueWith('switch');
   }
 
   /** Model/effort changed: the conversation continues with the new setting. */
@@ -808,7 +920,7 @@
       config.effort = conv.effort ?? '';
       config.mode = conv.mode ?? null;
       await invoke('resume_conversation', { paneId, config: $state.snapshot(config), sessionId: conv.sessionId });
-      appliedAccount = config.accountId;
+      markApplied();
       busy = false;
       streamingId = null;
       limitHit = false;
@@ -820,7 +932,7 @@
       const lastUser = [...(conv.messages ?? [])].reverse().find((m) => m.role === 'user');
       lastUserText = lastUser?.text ?? '';
       lastUserFiles = lastUser ? sentFiles(lastUser) : [];
-      messages = (conv.messages ?? []).map((m) => (m.approvalState === 'waiting' ? { ...m, approvalState: 'expired' as const } : m));
+      messages = (conv.messages ?? []).map(expireSaved);
       nextId = messages.reduce((mx, m) => Math.max(mx, m.id + 1), 0);
       totals = { ...emptyTotals(), ...(conv.totals ?? {}) };
       convId = conv.id;
@@ -840,15 +952,14 @@
   }
 
   function changeAccount() {
-    const a = findAccount(config.accountId);
-    applyConfig(`Account: ${a ? a.name : 'Default'}`);
+    continueWith('switch');
   }
 
   /** The user picked another account after hitting a limit. Never automatic. */
   function switchAccount() {
     if (!switchTo) return;
     config.accountId = switchTo;
-    changeAccount();
+    continueWith('limit');
   }
 
   async function send() {
@@ -865,27 +976,32 @@
     }
     // The pane got an account since its CLI started (e.g. the first one was just added).
     if (opened && config.accountId !== appliedAccount) {
-      if (messages.length) await applyConfig(`Account: ${account?.name ?? 'none'}`);
-      else {
-        try {
-          await invoke('update_pane', { paneId, config: $state.snapshot(config) });
-          appliedAccount = config.accountId;
-        } catch {}
-      }
+      try {
+        await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+        // The CLI starts fresh: the conversation so far goes along as a recap.
+        if (messages.some((m) => m.role === 'user') && !recapFrom) recapFrom = PROVIDERS[appliedProvider].label;
+        markApplied();
+      } catch {}
     }
     input = '';
     const files: SentFile[] = attachments.map(({ preview: _p, ...f }) => f);
     attachments = [];
     stopWaiting();
     limitHit = false;
+    if (recapFrom) {
+      const recap = buildRecap(recapSource(), text, recapFrom, 8000, 'switch');
+      recapFrom = null;
+      await sendText(recap, text, files, text);
+      return;
+    }
     await sendText(text, text, files);
   }
 
-  /** Send `cliText` to the CLI; show `shownText` in the chat. */
-  async function sendText(cliText: string, shownText: string, files: SentFile[] = []) {
+  /** Send `cliText` to the CLI; show `shownText` in the chat. `request` = what the user asked (re-sent by Continue / Allow & retry). */
+  async function sendText(cliText: string, shownText: string, files: SentFile[] = [], request = cliText) {
     if (!convId) startConversation(shownText || files[0]?.name || 'Attachment');
-    if (!shownText.startsWith('(Recap')) {
-      lastUserText = cliText;
+    if (!isRecapBubble(shownText)) {
+      lastUserText = request;
       lastUserFiles = files;
     }
     pendingLimit = null;
@@ -929,7 +1045,7 @@
     channel.onmessage = handle;
     try {
       await invoke('open_pane', { paneId, config: $state.snapshot(config), onEvent: channel });
-      appliedAccount = config.accountId;
+      markApplied();
       opened = true;
       nowTimer = setInterval(() => (now = Date.now()), 60_000);
     } catch (e) {
@@ -1046,7 +1162,7 @@
         <select id={`${paneId}-switch`} bind:value={switchTo}>
           {#each otherAccounts as a (a.id)}<option value={a.id}>{accountLabel(a)}</option>{/each}
         </select>
-        <button class="ghost" onclick={switchAccount}>Switch (new conversation)</button>
+        <button class="ghost" onclick={switchAccount}>Switch and continue</button>
       {:else}
         <button class="linklike" onclick={onopenaccounts}>Add another account</button>
       {/if}
@@ -1184,6 +1300,16 @@
             </p>
           {/if}
         </div>
+        {:else if m.role === 'question'}
+          <QuestionCard
+            who={m.tool ?? PROVIDERS[config.provider].label}
+            questions={m.questions ?? []}
+            status={m.questionState ?? 'expired'}
+            answers={m.answers}
+            onsubmit={(a) => answerQuestion(m, a)}
+          />
+        {:else if m.role === 'divider'}
+          <div class="divider" role="separator" aria-label={m.text}><span>{m.text}</span></div>
         {:else if m.role === 'notice'}
           <div class="msg notice" role="status">{m.text}</div>
         {:else if m.role !== 'tool'}
@@ -1417,6 +1543,9 @@
   .astate { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }
   .astate.allowed, .astate.allowed_session { color: var(--ok); }
   .astate.denied, .astate.kept { color: var(--danger); }
+  .divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0; }
+  .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+  .divider span { max-width: 80%; text-align: center; overflow-wrap: anywhere; }
   .notice { background: var(--warn-bg); color: var(--text); padding: 8px 12px; border-radius: 8px; font-size: 13px; }
   .composer { padding: 8px 8px 4px; border-top: 1px solid var(--border); }
   .composer .inputbox { max-width: 64rem; margin: 0 auto; }

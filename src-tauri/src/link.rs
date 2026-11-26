@@ -27,6 +27,46 @@ pub enum Pending {
     /// Codex app-server approval request (command or file change).
     /// `session_ok`: Codex offered "accept for this session".
     Codex { rpc_id: Value, session_ok: bool },
+    /// Claude Code AskUserQuestion (`can_use_tool`); `input` is sent back with the answers.
+    ClaudeQuestion { request_id: String, input: Value },
+    /// Codex app-server `item/tool/requestUserInput`.
+    CodexQuestion { rpc_id: Value },
+}
+
+/// The user's answers on a question form, by question id. `None` = skipped.
+pub type Answers = Option<HashMap<String, Vec<String>>>;
+
+/// The line to write to the CLI's stdin for answers to a question form.
+pub fn reply_answers(p: &Pending, answers: &Answers) -> Option<String> {
+    let v = match p {
+        Pending::ClaudeQuestion { request_id, input } => {
+            let response = match answers {
+                Some(a) => {
+                    // Claude's format: question text -> one answer string.
+                    let map: serde_json::Map<String, Value> = a
+                        .iter()
+                        .filter(|(_, v)| !v.is_empty())
+                        .map(|(k, v)| (k.clone(), json!(v.join(", "))))
+                        .collect();
+                    let mut updated = input.clone();
+                    updated["answers"] = Value::Object(map);
+                    json!({"behavior": "allow", "updatedInput": updated})
+                }
+                None => json!({"behavior": "deny", "message": "The user skipped these questions. Continue with your best judgement, or ask again in plain text if you really need the answer."}),
+            };
+            json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
+        }
+        Pending::CodexQuestion { rpc_id } => {
+            let map: serde_json::Map<String, Value> = answers
+                .iter()
+                .flatten()
+                .map(|(k, v)| (k.clone(), json!({"answers": v})))
+                .collect();
+            json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"answers": map}})
+        }
+        _ => return None,
+    };
+    Some(format!("{v}\n"))
 }
 
 #[derive(Default)]
@@ -83,6 +123,10 @@ pub fn reply(p: &Pending, d: Decision) -> String {
             };
             json!({"jsonrpc": "2.0", "id": rpc_id, "result": {"decision": decision}})
         }
+        // A question form answered with an approval button: treat as skipped.
+        Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. } => {
+            return reply_answers(p, &None).unwrap_or_default();
+        }
     };
     format!("{v}\n")
 }
@@ -112,6 +156,31 @@ mod tests {
         assert_eq!(rules[0]["destination"], "session", "never saved to the project's settings");
         let v: Value = serde_json::from_str(reply(&p, Decision::Deny).trim()).unwrap();
         assert_eq!(v["response"]["response"]["behavior"], "deny");
+    }
+
+    #[test]
+    fn question_replies() {
+        let p = Pending::ClaudeQuestion {
+            request_id: "q1".into(),
+            input: json!({"questions": [{"question": "Which DB?", "header": "DB", "options": [], "multiSelect": true}]}),
+        };
+        let mut a = HashMap::new();
+        a.insert("Which DB?".to_string(), vec!["Postgres".to_string(), "SQLite".to_string()]);
+        let v: Value = serde_json::from_str(reply_answers(&p, &Some(a.clone())).unwrap().trim()).unwrap();
+        let r = &v["response"]["response"];
+        assert_eq!(r["behavior"], "allow");
+        assert_eq!(r["updatedInput"]["answers"]["Which DB?"], "Postgres, SQLite");
+        assert_eq!(r["updatedInput"]["questions"][0]["header"], "DB", "questions are sent back too");
+        let v: Value = serde_json::from_str(reply_answers(&p, &None).unwrap().trim()).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "deny");
+
+        let c = Pending::CodexQuestion { rpc_id: json!(12) };
+        let mut a = HashMap::new();
+        a.insert("db".to_string(), vec!["Postgres".to_string()]);
+        let v: Value = serde_json::from_str(reply_answers(&c, &Some(a)).unwrap().trim()).unwrap();
+        assert_eq!(v["id"], 12);
+        assert_eq!(v["result"]["answers"]["db"]["answers"][0], "Postgres");
+        assert!(reply_answers(&Pending::Codex { rpc_id: json!(1), session_ok: true }, &None).is_none());
     }
 
     #[test]

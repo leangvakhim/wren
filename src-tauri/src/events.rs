@@ -74,6 +74,28 @@ pub fn claude_label(key: &str) -> String {
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// One question of a question form.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Question {
+    /// The key the answer is sent back under (Claude: the question text; Codex: its id).
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    /// Empty = a free-text question.
+    pub options: Vec<QuestionOption>,
+    pub multi: bool,
+    /// A typed "Other" answer is allowed.
+    pub other: bool,
+    /// Hide what is typed (Codex `isSecret`).
+    pub secret: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UiEvent {
     /// The CLI reported new plan-limit numbers for the pane's account.
@@ -85,6 +107,10 @@ pub enum UiEvent {
     /// `allow_session` is false when the AI doesn't offer "for this
     /// conversation" for this request (the card then hides that button).
     Approval { id: String, tool: String, title: String, detail: Option<String>, allow_session: bool },
+    /// The AI asks the user questions (Claude's AskUserQuestion, Codex's
+    /// request_user_input). Shown as a clickable form; answered with
+    /// `answer_question`.
+    Question { id: String, questions: Vec<Question> },
     /// Something the user should know about this turn (shown as a note).
     Notice { text: String },
     /// The CLI reported its own session/conversation id (used for resuming).

@@ -167,6 +167,7 @@ export type UiEvent =
   | { kind: 'plan_limits'; limits: PlanLimits }
   | { kind: 'thinking' }
   | { kind: 'approval'; id: string; tool: string; title: string; detail: string | null; allow_session: boolean }
+  | { kind: 'question'; id: string; questions: Question[] }
   | { kind: 'notice'; text: string }
   | { kind: 'session_started'; session_id: string; model: string | null }
   | { kind: 'text_delta'; text: string }
@@ -181,7 +182,7 @@ export type UiEvent =
 export interface Msg {
   id: number;
   /** notice = something Wren handled for you this turn ('details' = old raw logs, no longer shown). */
-  role: 'user' | 'assistant' | 'tool' | 'error' | 'info' | 'notice' | 'details' | 'approval';
+  role: 'user' | 'assistant' | 'tool' | 'error' | 'info' | 'notice' | 'details' | 'approval' | 'question' | 'divider';
   text: string;
   /** Tool calls: the command/file/query. */
   detail?: string;
@@ -199,6 +200,24 @@ export interface Msg {
   tool?: string;
   approvalState?: 'waiting' | 'allowed' | 'allowed_session' | 'denied' | 'expired' | 'refused' | 'retried' | 'kept';
   allowSession?: boolean;
+  /** Question forms: the questions, and the user's answers (by question id) once sent. */
+  questions?: Question[];
+  answers?: Record<string, string[]>;
+  questionState?: 'waiting' | 'answered' | 'skipped' | 'expired';
+}
+
+/** One question of a question form the AI asked (Claude AskUserQuestion, Codex request_user_input). */
+export interface Question {
+  /** Key the answer is sent back under. */
+  id: string;
+  header: string;
+  question: string;
+  /** Empty = free-text question. */
+  options: { label: string; description: string | null }[];
+  multi: boolean;
+  /** A typed answer is allowed. */
+  other: boolean;
+  secret: boolean;
 }
 
 export const PROVIDERS: Record<Provider, { label: string; bin: string }> = {

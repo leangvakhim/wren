@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::attachments::{human_size, Outgoing};
-use crate::events::{truncate, UiEvent, Usage};
+use crate::events::{truncate, Question, QuestionOption, UiEvent, Usage};
 use crate::link::{Link, Pending};
 
 const TOOL_OUTPUT_MAX: usize = 4000;
@@ -439,11 +439,20 @@ impl Parser {
         let allow_session = match &pending {
             Pending::Claude { .. } => true,
             Pending::Codex { session_ok, .. } => *session_ok,
+            Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. } => false,
         };
         if let Ok(mut l) = self.link.lock() {
             l.pending.insert(id.clone(), pending);
         }
         UiEvent::Approval { id, tool: tool.to_string(), title: truncate(&title, 600), detail: detail.map(|d| truncate(&d, 4000)), allow_session }
+    }
+
+    /// Show a question form and remember what the CLI is waiting for.
+    fn question(&mut self, id: String, pending: Pending, questions: Vec<Question>) -> UiEvent {
+        if let Ok(mut l) = self.link.lock() {
+            l.pending.insert(id.clone(), pending);
+        }
+        UiEvent::Question { id, questions }
     }
 
     /// Lines to write to the CLI's stdin, produced by the last `parse` calls.
@@ -509,12 +518,16 @@ impl Parser {
                     let tool = req["tool_name"].as_str().unwrap_or("tool").to_string();
                     let input = req["input"].clone();
                     if tool == "AskUserQuestion" {
-                        // Wren can't show Claude's question forms: ask in the reply instead.
-                        self.replies.push(format!(
-                            "{}\n",
-                            json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
-                                "response": {"behavior": "deny", "message": "This app can't show question forms. Ask the user your questions in plain text in your reply instead."}}})
-                        ));
+                        let questions = claude_questions(&input);
+                        if questions.is_empty() {
+                            self.replies.push(format!(
+                                "{}\n",
+                                json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+                                    "response": {"behavior": "deny", "message": "The question form was empty. Ask the user in plain text instead."}}})
+                            ));
+                            return out;
+                        }
+                        out.push(self.question(id.clone(), Pending::ClaudeQuestion { request_id: id, input }, questions));
                         return out;
                     }
                     let (title, detail) = if tool == "ExitPlanMode" {
@@ -652,6 +665,9 @@ impl Parser {
                         let what = item.unwrap_or_else(|| "Edit files".into());
                         let reason = p["reason"].as_str().map(String::from);
                         out.push(self.ask(wid, Pending::Codex { rpc_id, session_ok }, "Edit", what, reason));
+                    }
+                    "item/tool/requestUserInput" if !codex_questions(p).is_empty() => {
+                        out.push(self.question(wid, Pending::CodexQuestion { rpc_id }, codex_questions(p)));
                     }
                     other => {
                         self.replies.push(format!(
@@ -858,6 +874,68 @@ impl Parser {
     }
 }
 
+fn question_options(v: &Value) -> Vec<QuestionOption> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|o| {
+                    let label = o["label"].as_str().or(o.as_str())?.to_string();
+                    let description = o["description"].as_str().filter(|d| !d.is_empty()).map(String::from);
+                    Some(QuestionOption { label, description })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Claude's AskUserQuestion input. Answers are keyed by the question text.
+fn claude_questions(input: &Value) -> Vec<Question> {
+    input["questions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|q| {
+                    let question = q["question"].as_str()?.to_string();
+                    Some(Question {
+                        id: question.clone(),
+                        header: q["header"].as_str().unwrap_or_default().to_string(),
+                        options: question_options(&q["options"]),
+                        multi: q["multiSelect"].as_bool().unwrap_or(false),
+                        // Claude always lets the user type their own answer.
+                        other: true,
+                        secret: false,
+                        question,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Codex's request_user_input params. Answers are keyed by the question id.
+fn codex_questions(p: &Value) -> Vec<Question> {
+    p["questions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|q| {
+                    let options = question_options(&q["options"]);
+                    Some(Question {
+                        id: q["id"].as_str()?.to_string(),
+                        header: q["header"].as_str().unwrap_or_default().to_string(),
+                        question: q["question"].as_str().unwrap_or_default().to_string(),
+                        multi: false,
+                        // No options means a free-text question.
+                        other: q["isOther"].as_bool().unwrap_or(false) || options.is_empty(),
+                        secret: q["isSecret"].as_bool().unwrap_or(false),
+                        options,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A short, human-readable line for a tool call's input.
 fn summarize_input(input: &Value) -> String {
     for key in [
@@ -980,6 +1058,13 @@ mod tests {
         p.parse(r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":50,"cachedInputTokens":4,"outputTokens":19}}}}"#);
         let ev = p.parse(r#"{"method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"boom"}}}}"#);
         assert!(matches!(&ev[0], UiEvent::TurnDone { usage, error: Some(e), .. } if usage.input_tokens == 30 && usage.output_tokens == 10 && e == "boom"));
+        // Question forms (shape from the codex 0.171 app-server schema).
+        let ev = p.parse(r#"{"id":11,"method":"item/tool/requestUserInput","params":{"threadId":"t","turnId":"u","itemId":"i","isBlocking":true,"questions":[{"id":"db","header":"DB","question":"Which database?","isOther":true,"options":[{"label":"Postgres","description":"server"}]},{"id":"key","header":"Key","question":"API key?","isSecret":true,"options":null}]}}"#);
+        let UiEvent::Question { id, questions } = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(id, "codex-11");
+        assert_eq!(questions[0].id, "db");
+        assert!(questions[1].secret && questions[1].other && questions[1].options.is_empty());
+        assert!(p.take_replies().is_empty());
         // Requests Wren can't show are declined at once.
         let ev = p.parse(r#"{"id":9,"method":"item/tool/requestUserInput","params":{}}"#);
         assert!(matches!(&ev[0], UiEvent::Notice { .. }));
@@ -1097,8 +1182,17 @@ mod tests {
         assert!(p.take_replies().is_empty(), "waits for the user");
         assert!(matches!(link.lock().unwrap().pending.get("r1"), Some(Pending::Claude { .. })));
 
-        // Question forms can't be shown: declined with a hint at once.
-        let ev = p.parse(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{}}}"#);
+        // Question forms become clickable forms; an empty one is declined at once.
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which framework?","header":"Framework","multiSelect":false,"options":[{"label":"Svelte (Recommended)","description":"Small"},{"label":"React","description":""}]}]}}}"#);
+        let UiEvent::Question { id, questions } = &ev[0] else { panic!("{ev:?}") };
+        assert_eq!(id, "r2");
+        assert_eq!(questions[0].id, "Which framework?");
+        assert_eq!(questions[0].options.len(), 2);
+        assert_eq!(questions[0].options[1].description, None);
+        assert!(questions[0].other && !questions[0].multi);
+        assert!(p.take_replies().is_empty(), "waits for the user");
+        assert!(matches!(link.lock().unwrap().pending.get("r2"), Some(Pending::ClaudeQuestion { .. })));
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r4","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{}}}"#);
         assert!(ev.is_empty());
         let v: Value = serde_json::from_str(p.take_replies()[0].trim()).unwrap();
         assert_eq!(v["response"]["response"]["behavior"], "deny");

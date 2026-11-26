@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::events::UiEvent;
 use crate::attachments::Outgoing;
-use crate::link::{new_link, reply, Decision, Link};
+use crate::link::{new_link, reply, reply_answers, Answers, Decision, Link};
 use crate::providers::{codex_thread_request, Mode, Parser, Permission, Provider};
 
 pub const MAX_PANES: usize = 4;
@@ -185,6 +185,22 @@ impl Manager {
             .and_then(|r| r.stdin_tx.as_ref())
             .ok_or("This request is no longer waiting (the task was stopped).")?;
         tx.send(reply(&pending, decision)).map_err(|_| "CLI input is closed".to_string())
+    }
+
+    /// The user answered (or skipped, `None`) a question form.
+    pub fn answer_question(&self, pane_id: &str, id: &str, answers: Answers) -> Result<(), String> {
+        let map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get(pane_id).ok_or("unknown pane")?;
+        let pending = s.link.lock().map_err(|e| e.to_string())?.pending.remove(id);
+        let pending = pending.ok_or("These questions are no longer waiting (the task was stopped or restarted).")?;
+        let line = reply_answers(&pending, &answers).ok_or("This isn't a question form.")?;
+        let tx = s
+            .run
+            .as_ref()
+            .filter(|_| s.is_running())
+            .and_then(|r| r.stdin_tx.as_ref())
+            .ok_or("These questions are no longer waiting (the task was stopped).")?;
+        tx.send(line).map_err(|_| "CLI input is closed".to_string())
     }
 
     /// Change the permission WITHOUT losing the conversation (used by
@@ -651,6 +667,164 @@ mod tests {
         let e = events.lock().unwrap();
         assert_eq!(e.iter().filter(|s| s.contains("\"kind\":\"approval\"")).count(), 1, "asked once: {e:?}");
         assert!(dir.join("a.txt").exists(), "the allowed command ran");
+        m.kill_all();
+    }
+
+    #[test]
+    /// The real Claude Code against a fake API that calls AskUserQuestion
+    /// (WREN_FAKE_API3=<url>): the form reaches Wren and the answers reach the model.
+    fn real_claude_question_form() {
+        let Ok(api) = std::env::var("WREN_FAKE_API3") else { return };
+        let dir = std::env::temp_dir().join(format!("wren-q-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ev2 = events.clone();
+        let channel: Channel<UiEvent> = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(s) = body {
+                ev2.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        let m = Manager::default();
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Manual,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+        };
+        let env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), api),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
+        ];
+        tauri::async_runtime::block_on(async {
+            m.open("q1".into(), cfg, Ok(env), channel).unwrap();
+            m.send("q1", "ask me".into(), vec![]).unwrap();
+            wait_for(&events, "\"kind\":\"question\"", 1);
+            let id = {
+                let e = events.lock().unwrap();
+                let form = e.iter().find(|s| s.contains("\"kind\":\"question\"")).unwrap().clone();
+                assert!(form.contains("Which framework?") && form.contains("\"multi\":true"), "{form}");
+                serde_json::from_str::<serde_json::Value>(&form).unwrap()["id"].as_str().unwrap().to_string()
+            };
+            let mut a = std::collections::HashMap::new();
+            a.insert("Which framework?".to_string(), vec!["Svelte (Recommended)".to_string()]);
+            a.insert("Which extras?".to_string(), vec!["Tests".to_string(), "Lint".to_string()]);
+            m.answer_question("q1", &id, Some(a)).unwrap();
+            wait_for(&events, "turn_done", 1);
+        });
+        let e = events.lock().unwrap().join("\n");
+        assert!(e.contains("GOT: ") && e.contains("Svelte (Recommended)") && e.contains("Tests, Lint"), "{e}");
+        m.kill_all();
+    }
+
+    #[test]
+    /// Switching account keeps the conversation: a turn with account A, the
+    /// session copied to account B's folder, then B resumes it
+    /// (WREN_FAKE_API3=<url>; the fake API logs what the model is sent to
+    /// WREN_FAKE_LOG).
+    fn real_claude_carry_session() {
+        let (Ok(api), Ok(log)) = (std::env::var("WREN_FAKE_API3"), std::env::var("WREN_FAKE_LOG")) else { return };
+        let dir = std::env::temp_dir().join(format!("wren-carry-{}", std::process::id()));
+        let (home_a, home_b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&home_b).unwrap();
+        let env = |home: &std::path::Path| {
+            Ok(vec![
+                ("ANTHROPIC_BASE_URL".to_string(), api.clone()),
+                ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+                ("CLAUDE_CONFIG_DIR".to_string(), home.to_string_lossy().to_string()),
+            ])
+        };
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Manual,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+        };
+        let m = Manager::default();
+        let (events, ch) = collector();
+        tauri::async_runtime::block_on(async {
+            m.open("k1".into(), cfg.clone(), env(&home_a), ch).unwrap();
+            m.send("k1", "remember the word PELICAN".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 1);
+        });
+        let sid = {
+            let e = events.lock().unwrap();
+            let s = e.iter().find(|s| s.contains("session_started")).unwrap().clone();
+            serde_json::from_str::<serde_json::Value>(&s).unwrap()["session_id"].as_str().unwrap().to_string()
+        };
+        assert!(crate::handoff::copy_session(Provider::Claude, &home_a, &home_b, &sid).unwrap());
+        let _ = std::fs::remove_file(&log);
+        tauri::async_runtime::block_on(async {
+            m.resume("k1", cfg.clone(), env(&home_b), Some(sid.clone())).unwrap();
+            m.send("k1", "which word?".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 2);
+        });
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            sent.lines().any(|l| l.contains("PELICAN") && l.contains("which word?")),
+            "account B's request carries the earlier turn: {sent}"
+        );
+        m.kill_all();
+    }
+
+    #[test]
+    /// Same for Codex (WREN_FAKE_OPENAI=<base url ending in /v1>, WREN_FAKE_LOG):
+    /// a thread started with account A continues with account B.
+    fn real_codex_carry_session() {
+        let (Ok(api), Ok(log)) = (std::env::var("WREN_FAKE_OPENAI"), std::env::var("WREN_FAKE_LOG")) else { return };
+        let dir = std::env::temp_dir().join(format!("wren-cxcarry-{}", std::process::id()));
+        let (home_a, home_b) = (dir.join("a"), dir.join("b"));
+        let config = format!(
+            "model = \"gpt-fake\"\nmodel_provider = \"fake\"\n[model_providers.fake]\nname = \"fake\"\nbase_url = \"{api}\"\nenv_key = \"FAKE_KEY\"\nwire_api = \"responses\"\n"
+        );
+        for h in [&home_a, &home_b] {
+            std::fs::create_dir_all(h).unwrap();
+            std::fs::write(h.join("config.toml"), &config).unwrap();
+        }
+        let env = |home: &std::path::Path| Ok(vec![("CODEX_HOME".to_string(), home.to_string_lossy().to_string()), ("FAKE_KEY".to_string(), "x".to_string())]);
+        let cfg = PaneConfig {
+            provider: Provider::Codex,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Auto,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+        };
+        let m = Manager::default();
+        let (events, ch) = collector();
+        tauri::async_runtime::block_on(async {
+            m.open("x1".into(), cfg.clone(), env(&home_a), ch).unwrap();
+            m.send("x1", "remember the word PELICAN".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 1);
+        });
+        let tid = {
+            let e = events.lock().unwrap();
+            let s = e.iter().find(|s| s.contains("session_started")).unwrap().clone();
+            serde_json::from_str::<serde_json::Value>(&s).unwrap()["session_id"].as_str().unwrap().to_string()
+        };
+        m.stop("x1").unwrap();
+        assert!(crate::handoff::copy_session(Provider::Codex, &home_a, &home_b, &tid).unwrap());
+        let _ = std::fs::remove_file(&log);
+        tauri::async_runtime::block_on(async {
+            m.resume("x1", cfg.clone(), env(&home_b), Some(tid.clone())).unwrap();
+            m.send("x1", "which word?".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 2);
+        });
+        let all = events.lock().unwrap().join("\n");
+        assert!(!all.contains("couldn't reopen"), "resumed, not restarted: {all}");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            sent.lines().any(|l| l.contains("PELICAN") && l.contains("which word?")),
+            "account B's request carries the earlier turn: {sent}"
+        );
         m.kill_all();
     }
 
