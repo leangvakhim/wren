@@ -13,7 +13,7 @@
   import { modelLists, modelName, modelsKey } from './models.svelte';
   import { settings } from './settings.svelte';
   import { buildRecap, formatWait, isLimitMessage, isRecapBubble, parseResetTime } from './limits';
-  import { renderMarkdown } from './markdown';
+  import { CHECK_ICON, COPY_ICON, copyText, renderMarkdown } from './markdown';
   import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
   import { MODES, PROVIDERS, PERMISSIONS, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
 
@@ -242,6 +242,90 @@
     });
     return out;
   });
+
+  /** The latest turn (from the last message you sent) is shown on its own, at least one screen tall, so it can sit at the top like in Claude Desktop. */
+  const itemKey = (it: Item) => (it.kind === 'group' ? `g${it.key}` : it.m.id);
+  const lastUserAt = $derived.by(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === 'msg' && it.m.role === 'user') return i;
+    }
+    return -1;
+  });
+  const older = $derived(lastUserAt < 0 ? items : items.slice(0, lastUserAt));
+  const latest = $derived(lastUserAt < 0 ? [] : items.slice(lastUserAt));
+  /** Height of the chat area minus room for the bottom padding and a small gap above the turn. */
+  let viewH = $state(0);
+  /** Keep scrolling down with new output (only after you scroll to the end of a long answer yourself). */
+  let followTail = false;
+  let turnEl: HTMLDivElement | undefined = $state();
+
+  function onListScroll() {
+    if (!listEl) return;
+    const nearBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 40;
+    followTail = nearBottom && !!turnEl && turnEl.offsetHeight > viewH + 4;
+  }
+
+  /** After sending: your message rolls up to the top; the progress and the answer come in under it. */
+  function scrollToTurn() {
+    followTail = false;
+    tick().then(() => {
+      if (listEl && turnEl) listEl.scrollTo({ top: turnEl.offsetTop - 8, behavior: 'smooth' });
+    });
+  }
+
+  // ---- long messages you sent: first lines only, with Show more ----
+  let expanded = $state<Record<number, boolean>>({});
+  let tall = $state<Record<number, boolean>>({});
+  function measureTall(node: HTMLElement, id: number) {
+    const check = () => {
+      if (!expanded[id]) tall[id] = node.scrollHeight > node.clientHeight + 2;
+    };
+    const ro = new ResizeObserver(check);
+    ro.observe(node);
+    check();
+    return { destroy: () => ro.disconnect() };
+  }
+
+  // ---- the message box grows with its text, up to half the pane ----
+  let paneEl: HTMLElement | undefined = $state();
+  let inputEl: HTMLTextAreaElement | undefined = $state();
+  function autosize() {
+    if (!inputEl) return;
+    const max = Math.max(80, Math.floor((paneEl?.clientHeight ?? 600) / 2));
+    inputEl.style.height = 'auto';
+    const h = Math.min(inputEl.scrollHeight, max);
+    inputEl.style.height = `${h}px`;
+    inputEl.style.overflowY = inputEl.scrollHeight > max ? 'auto' : 'hidden';
+  }
+  $effect(() => {
+    void input;
+    tick().then(autosize);
+  });
+
+  $effect(() => {
+    const el = listEl;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      viewH = Math.max(0, el.clientHeight - 24);
+      autosize();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
+
+  /** Copy buttons on code blocks (added by renderMarkdown). */
+  async function copyCode(btn: HTMLButtonElement) {
+    const pre = btn.parentElement?.querySelector('pre');
+    if (!pre) return;
+    const ok = await copyText(pre.innerText.replace(/\n$/, ''));
+    btn.innerHTML = ok ? `${CHECK_ICON}<span>Copied</span>` : 'Copy failed';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.innerHTML = COPY_ICON;
+      btn.classList.remove('copied');
+    }, 2000);
+  }
 
   const BIRD_WORDS = ['Pecking', 'Foraging', 'Figuring', 'Nesting', 'Preening', 'Scouting', 'Hopping', 'Fluttering', 'Gathering twigs'];
   const verb = $derived.by(() => {
@@ -613,8 +697,7 @@
 
   function scrollToEnd(force = false) {
     if (!listEl) return;
-    const nearBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 120;
-    if (force || nearBottom) {
+    if (force || followTail) {
       tick().then(() => listEl && (listEl.scrollTop = listEl.scrollHeight));
     }
   }
@@ -1016,7 +1099,7 @@
     turnStartedAt = tickNow = Date.now();
     clearInterval(tickTimer);
     tickTimer = setInterval(() => (tickNow = Date.now()), 1000);
-    scrollToEnd(true);
+    scrollToTurn();
     try {
       await invoke('send_message', { paneId, text: cliText, files: files.map((f) => f.path) });
     } catch (e) {
@@ -1035,7 +1118,10 @@
 
   // Links inside answers must not navigate the app window.
   function blockLinks(e: MouseEvent) {
-    if ((e.target as HTMLElement).closest('a')) e.preventDefault();
+    const t = e.target as HTMLElement;
+    const copy = t.closest<HTMLButtonElement>('button.copybtn');
+    if (copy) return void copyCode(copy);
+    if (t.closest('a')) e.preventDefault();
   }
 
   const fmt = (n: number) => (n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
@@ -1063,7 +1149,7 @@
   });
 </script>
 
-<section class="pane" class:active onpointerdown={onactivate} aria-label={`Conversation ${index + 1}`}>
+<section class="pane" bind:this={paneEl} class:active onpointerdown={onactivate} aria-label={`Conversation ${index + 1}`}>
   <header class="bar">
     <label class="sr" for={`${paneId}-provider`}>AI</label>
     <select
@@ -1182,7 +1268,7 @@
   {/each}
 
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="messages" bind:this={listEl} onclick={blockLinks}>
+  <div class="messages" bind:this={listEl} onclick={blockLinks} onscroll={onListScroll}>
     {#if messages.length === 0}
       <div class="empty">
         <Logo size={56} color="var(--muted)" hole="var(--surface)" />
@@ -1192,7 +1278,16 @@
       </div>
     {/if}
     <div class="col">
-    {#each items as it (it.kind === 'group' ? `g${it.key}` : it.m.id)}
+    {#each older as it (itemKey(it))}{@render row(it)}{/each}
+    {#if latest.length}
+      <div class="turn" bind:this={turnEl} style:min-height={`${viewH}px`}>
+        {#each latest as it (itemKey(it))}{@render row(it)}{/each}
+      </div>
+    {/if}
+    </div>
+  </div>
+
+  {#snippet row(it: Item)}
       {#if it.kind === 'group'}
         {@const open = openTurns[it.key] ?? it.live}
         <div class="steps" class:live={it.live}>
@@ -1251,7 +1346,12 @@
               {/each}
             </div>
           {/if}
-          {#if m.text}<div class="msg user">{m.text}</div>{/if}
+          {#if m.text}
+            <div class="msg user" class:clamped={!expanded[m.id]} class:fade={tall[m.id] && !expanded[m.id]} use:measureTall={m.id}>{m.text}</div>
+            {#if tall[m.id] || expanded[m.id]}
+              <button class="more" aria-expanded={!!expanded[m.id]} onclick={() => (expanded[m.id] = !expanded[m.id])}>{expanded[m.id] ? 'Show less' : 'Show more'}</button>
+            {/if}
+          {/if}
         {:else if m.role === 'assistant'}
           <div class="msg assistant md">{@html renderMarkdown(m.text)}</div>
         {:else if m.role === 'error'}
@@ -1316,9 +1416,7 @@
           <div class="msg info">{m.text}</div>
         {/if}
       {/if}
-    {/each}
-    </div>
-  </div>
+  {/snippet}
 
   <footer class="composer">
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1351,6 +1449,7 @@
       <label class="sr" for={`${paneId}-input`}>Message</label>
       <textarea
         id={`${paneId}-input`}
+        bind:this={inputEl}
         rows="2"
         bind:value={input}
         onkeydown={onKey}
@@ -1448,6 +1547,7 @@
   .model { font-size: 12px; color: var(--muted); font-family: var(--mono); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .banner { margin: 0; padding: 8px 12px; background: var(--warn-bg); color: var(--text); font-size: 13px; }
   .messages {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     padding: 16px;
@@ -1456,6 +1556,23 @@
   }
   /* The conversation stays in a centered column (max 5xl = 64rem), like Claude Desktop. */
   .col { width: 100%; max-width: 64rem; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+  .turn { display: flex; flex-direction: column; gap: 10px; }
+  .user.clamped { max-height: calc(1.5em * 8 + 16px); overflow: hidden; }
+  .user.fade { mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent); }
+  .more { align-self: flex-end; margin-top: -4px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; padding: 2px 4px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .more:hover { color: var(--text); }
+  .md :global(.codeblock) { position: relative; }
+  .md :global(.codeblock pre) { padding-right: 44px; }
+  .md :global(.copybtn) {
+    position: absolute; top: 6px; right: 6px;
+    display: inline-flex; align-items: center; gap: 4px;
+    min-width: 28px; min-height: 28px; padding: 0 7px; justify-content: center;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+    opacity: 0.85;
+  }
+  .md :global(.copybtn:hover), .md :global(.copybtn:focus-visible) { color: var(--text); opacity: 1; }
+  .md :global(.copybtn.copied) { color: var(--ok); opacity: 1; }
 
   /* Cowork-style step group: one per turn. */
   .steps { align-self: stretch; display: flex; flex-direction: column; gap: 6px; }
