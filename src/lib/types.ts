@@ -221,10 +221,14 @@ export interface Msg {
   images?: string[];
   /** User messages: how long the AI worked on this turn (ms), for "Worked for 3m 33s". */
   durationMs?: number;
+  /** Info notes about the work in progress (e.g. a permission change during a task): shown in the turn's steps. */
+  step?: boolean;
   /** Approval cards: the CLI's request id, the tool, and what happened. */
   approvalId?: string;
   tool?: string;
-  approvalState?: 'waiting' | 'allowed' | 'allowed_session' | 'denied' | 'expired' | 'refused' | 'retried' | 'kept';
+  /** auto_allowed = allowed because you switched to Auto / Full access while it waited (`autoBy` = that mode's label). */
+  approvalState?: 'waiting' | 'allowed' | 'allowed_session' | 'denied' | 'expired' | 'refused' | 'retried' | 'kept' | 'auto_allowed';
+  autoBy?: string;
   allowSession?: boolean;
   /** Question forms: the questions, and the user's answers (by question id) once sent. */
   questions?: Question[];

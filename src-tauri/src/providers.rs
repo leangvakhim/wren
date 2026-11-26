@@ -83,6 +83,23 @@ pub enum Permission {
     Full,
 }
 
+impl Permission {
+    /// Claude Code's `--permission-mode` / `set_permission_mode` name.
+    pub fn claude_mode(self) -> &'static str {
+        match self {
+            Permission::Manual => "default",
+            Permission::Auto => "auto",
+            Permission::Plan => "plan",
+            Permission::Full => "bypassPermissions",
+        }
+    }
+
+    /// Nothing waits for the user in this mode.
+    pub fn never_asks(self) -> bool {
+        matches!(self, Permission::Auto | Permission::Full)
+    }
+}
+
 /// Codex app-server thread settings for a permission level:
 /// (approvalPolicy, sandbox, approvalsReviewer).
 pub fn codex_policy(perm: Permission) -> (&'static str, &'static str, Option<&'static str>) {
@@ -218,6 +235,11 @@ impl Provider {
                         push("auto");
                     }
                     Permission::Full => push("--dangerously-skip-permissions"),
+                }
+                // Lets the user switch to Full access while a task runs
+                // (`set_permission_mode`); it doesn't skip anything by itself.
+                if perm != Permission::Full {
+                    push("--allow-dangerously-skip-permissions");
                 }
                 push("--permission-prompt-tool");
                 push("stdio");
@@ -501,9 +523,9 @@ pub struct Parser {
     codex_items: HashMap<String, String>,
     /// Codex: latest cumulative token usage of the thread.
     codex_total: Usage,
-    /// Claude in Auto / Full: approval requests are refused at once instead
-    /// of shown (questions are still shown).
-    refuse_approvals: bool,
+    /// The permission this process was started with. The user may change it
+    /// while the process runs (`LinkState::permission`).
+    launched: Permission,
 }
 
 impl Parser {
@@ -517,14 +539,36 @@ impl Parser {
             fallback_start,
             codex_items: HashMap::new(),
             codex_total: Usage::default(),
-            refuse_approvals: false,
+            launched: Permission::Manual,
         }
     }
 
     /// Auto / Full never wait for the user: approval requests are refused at once.
     pub fn for_permission(mut self, perm: Permission) -> Self {
-        self.refuse_approvals = matches!(perm, Permission::Auto | Permission::Full);
+        self.launched = perm;
         self
+    }
+
+    /// The permission right now (the user may have changed it during the task).
+    fn permission(&self) -> Permission {
+        self.link.lock().ok().and_then(|l| l.permission).unwrap_or(self.launched)
+    }
+
+    /// Codex, after the user changed the permission during the task (Codex
+    /// keeps the old one until the next message): Auto / Full allow the
+    /// request, Plan declines it. `false` = show the card as usual.
+    fn codex_switched(&mut self, pending: &Pending) -> bool {
+        let now = self.permission();
+        if now == self.launched {
+            return false;
+        }
+        let line = match now {
+            Permission::Auto | Permission::Full => crate::link::reply_switched(pending, now.claude_mode()),
+            Permission::Plan => crate::link::reply(pending, crate::link::Decision::Deny),
+            Permission::Manual => return false,
+        };
+        self.replies.push(line);
+        true
     }
 
     /// Show an approval card and remember what the CLI is waiting for.
@@ -623,7 +667,7 @@ impl Parser {
                         out.push(self.question(id.clone(), Pending::ClaudeQuestion { request_id: id, input }, questions));
                         return out;
                     }
-                    if self.refuse_approvals {
+                    if self.permission().never_asks() {
                         self.replies.push(format!(
                             "{}\n",
                             json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
@@ -650,6 +694,14 @@ impl Parser {
                             "error": format!("Wren does not support the '{sub}' request")}})
                     ));
                     out.push(UiEvent::Notice { text: format!("Claude Code asked Wren for \"{sub}\", which Wren doesn't support, so it was declined.") });
+                }
+            }
+            // Claude refused a permission change made during the task.
+            "control_response" => {
+                let r = &v["response"];
+                if r["request_id"].as_str().is_some_and(|i| i.starts_with("wren-perm")) && r["subtype"] == "error" {
+                    let why = r["error"].as_str().unwrap_or("no reason given");
+                    out.push(UiEvent::Notice { text: format!("Claude Code couldn't change the permission during this task ({why}). It applies from your next message.") });
                 }
             }
             "assistant" => {
@@ -760,13 +812,19 @@ impl Parser {
                         let item = p["itemId"].as_str().and_then(|i| self.codex_items.get(i)).cloned();
                         let cmd = p["command"].as_str().map(String::from).or(item).unwrap_or_else(|| "a command".into());
                         let reason = p["reason"].as_str().map(String::from);
-                        out.push(self.ask(wid, Pending::Codex { rpc_id, session_ok }, "Shell", cmd, reason));
+                        let pending = Pending::Codex { rpc_id, session_ok };
+                        if !self.codex_switched(&pending) {
+                            out.push(self.ask(wid, pending, "Shell", cmd, reason));
+                        }
                     }
                     "item/fileChange/requestApproval" | "applyPatchApproval" => {
                         let item = p["itemId"].as_str().and_then(|i| self.codex_items.get(i)).cloned();
                         let what = item.unwrap_or_else(|| "Edit files".into());
                         let reason = p["reason"].as_str().map(String::from);
-                        out.push(self.ask(wid, Pending::Codex { rpc_id, session_ok }, "Edit", what, reason));
+                        let pending = Pending::Codex { rpc_id, session_ok };
+                        if !self.codex_switched(&pending) {
+                            out.push(self.ask(wid, pending, "Edit", what, reason));
+                        }
                     }
                     "item/tool/requestUserInput" if !codex_questions(p).is_empty() => {
                         out.push(self.question(wid, Pending::CodexQuestion { rpc_id }, codex_questions(p)));
@@ -779,7 +837,10 @@ impl Parser {
                         let params = &p["_meta"]["tool_params"];
                         let what = if params.is_null() { tool.to_string() } else { format!("{tool}: {}", summarize_input(params)) };
                         let why = p["message"].as_str().map(String::from).filter(|m| !m.is_empty());
-                        out.push(self.ask(wid, Pending::CodexMcpTool { rpc_id }, &label, what, why));
+                        let pending = Pending::CodexMcpTool { rpc_id };
+                        if !self.codex_switched(&pending) {
+                            out.push(self.ask(wid, pending, &label, what, why));
+                        }
                     }
                     // Other MCP forms: decline (Wren can't show them yet).
                     "mcpServer/elicitation/request" => {
@@ -1351,6 +1412,43 @@ mod tests {
         let ev = p.parse(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","header":"H","multiSelect":false,"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}}}"#);
         assert!(matches!(&ev[0], UiEvent::Question { id, .. } if id == "r2"));
         assert!(p.take_replies().is_empty(), "the form waits for the user");
+    }
+
+    #[test]
+    fn permission_changed_during_the_task() {
+        // Claude started in Manual, switched to Full: no more cards.
+        let link = crate::link::new_link(true);
+        let mut p = Parser::new(Provider::Claude, Arc::new(Mutex::new(None)), link.clone(), None).for_permission(Permission::Manual);
+        link.lock().unwrap().permission = Some(Permission::Full);
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#);
+        assert!(ev.is_empty());
+        assert_eq!(p.take_replies().len(), 1);
+        // Started in Auto, switched to Manual: cards again.
+        link.lock().unwrap().permission = None;
+        let mut p = Parser::new(Provider::Claude, Arc::new(Mutex::new(None)), link.clone(), None).for_permission(Permission::Auto);
+        link.lock().unwrap().permission = Some(Permission::Manual);
+        let ev = p.parse(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#);
+        assert!(matches!(&ev[0], UiEvent::Approval { id, .. } if id == "r2"));
+        // Claude refused the switch: a notice.
+        let ev = p.parse(r#"{"type":"control_response","response":{"subtype":"error","request_id":"wren-perm-3","error":"Cannot set permission mode to auto","error_code":"auto_mode_unavailable"}}"#);
+        assert!(matches!(&ev[0], UiEvent::Notice { text } if text.contains("next message")));
+        assert!(p.parse(r#"{"type":"control_response","response":{"subtype":"success","request_id":"wren-perm-4","response":{"mode":"auto"}}}"#).is_empty());
+
+        // Codex started in Manual: Full allows, Plan declines, Manual shows the card.
+        let link = crate::link::new_link(true);
+        let mut p = Parser::new(Provider::Codex, Arc::new(Mutex::new(None)), link.clone(), None).for_permission(Permission::Manual);
+        link.lock().unwrap().permission = Some(Permission::Full);
+        assert!(p.parse(r#"{"id":5,"method":"item/commandExecution/requestApproval","params":{"itemId":"i1","command":"touch x"}}"#).is_empty());
+        let v: Value = serde_json::from_str(p.take_replies()[0].trim()).unwrap();
+        assert_eq!((v["id"].clone(), v["result"]["decision"].clone()), (json!(5), json!("accept")));
+        link.lock().unwrap().permission = Some(Permission::Plan);
+        assert!(p.parse(r#"{"id":6,"method":"item/fileChange/requestApproval","params":{"itemId":"i2"}}"#).is_empty());
+        let v: Value = serde_json::from_str(p.take_replies()[0].trim()).unwrap();
+        assert_eq!(v["result"]["decision"], "decline");
+        link.lock().unwrap().permission = Some(Permission::Manual);
+        let ev = p.parse(r#"{"id":7,"method":"item/commandExecution/requestApproval","params":{"itemId":"i1","command":"touch y"}}"#);
+        assert!(matches!(&ev[0], UiEvent::Approval { .. }));
+        assert!(p.take_replies().is_empty());
     }
 
     #[test]

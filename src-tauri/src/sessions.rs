@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::events::UiEvent;
 use crate::attachments::Outgoing;
-use crate::link::{new_link, reply, reply_answers, Answers, Decision, Link};
+use crate::link::{new_link, reply, reply_answers, reply_switched, Answers, Decision, Link};
 use crate::providers::{codex_thread_request, Mode, Parser, Permission, Provider};
 
 pub const MAX_PANES: usize = 4;
@@ -230,6 +230,42 @@ impl Manager {
         s.kill();
         s.cfg.permission = permission;
         Ok(())
+    }
+
+    /// Change the permission WHILE a task runs, without stopping it. Claude
+    /// Code switches at once (`set_permission_mode`); Codex answers its
+    /// remaining requests by the new permission (the parser checks
+    /// `LinkState::permission`); Antigravity can't change. Auto / Full also
+    /// allow the approval cards that are waiting. Returns the ids of the cards
+    /// allowed. The caller restarts the CLI after the task (`set_permission`)
+    /// so the next message runs fully in the new mode.
+    pub fn set_permission_live(&self, pane_id: &str, permission: Permission) -> Result<Vec<String>, String> {
+        let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get_mut(pane_id).ok_or("unknown pane")?;
+        s.cfg.permission = permission;
+        let provider = s.cfg.provider;
+        let Some(tx) = s.run.as_ref().filter(|_| s.is_running()).and_then(|r| r.stdin_tx.clone()) else {
+            return Ok(vec![]);
+        };
+        let mut link = s.link.lock().map_err(|e| e.to_string())?;
+        link.permission = Some(permission);
+        let mut allowed = vec![];
+        if permission.never_asks() {
+            let ids: Vec<String> = link.pending.iter().filter(|(_, p)| !p.is_question()).map(|(id, _)| id.clone()).collect();
+            for id in ids {
+                if let Some(p) = link.pending.remove(&id) {
+                    tx.send(reply_switched(&p, permission.claude_mode())).map_err(|_| "CLI input is closed".to_string())?;
+                    allowed.push(id);
+                }
+            }
+        }
+        if provider == Provider::Claude {
+            link.next_id += 1;
+            let req = serde_json::json!({"type": "control_request", "request_id": format!("wren-perm-{}", link.next_id),
+                "request": {"subtype": "set_permission_mode", "mode": permission.claude_mode()}});
+            tx.send(format!("{req}\n")).map_err(|_| "CLI input is closed".to_string())?;
+        }
+        Ok(allowed)
     }
 
     /// Change model/effort WITHOUT losing the conversation: the CLI is
@@ -759,6 +795,62 @@ mod tests {
         let e = events.lock().unwrap();
         assert_eq!(e.iter().filter(|s| s.contains("\"kind\":\"approval\"")).count(), 1, "asked once: {e:?}");
         assert!(dir.join("a.txt").exists(), "the allowed command ran");
+        m.kill_all();
+    }
+
+    #[test]
+    /// The real Claude Code against a fake API that runs two commands in one
+    /// task (WREN_FAKE_API4=<url>, WREN_FAKE_DIR=<folder the commands touch>):
+    /// the first asks in Manual; switching to Full access during the task
+    /// allows it, and the second runs without asking.
+    fn real_claude_live_permission() {
+        let (Ok(api), Ok(dir)) = (std::env::var("WREN_FAKE_API4"), std::env::var("WREN_FAKE_DIR")) else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join("a.txt"));
+        let _ = std::fs::remove_file(dir.join("b.txt"));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ev2 = events.clone();
+        let channel: Channel<UiEvent> = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(s) = body {
+                ev2.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        let m = Manager::default();
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Manual,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+            github_account_id: None,
+            ai_browser: false,
+        };
+        let env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), api),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
+        ];
+        tauri::async_runtime::block_on(async {
+            m.open("l1".into(), cfg, Ok(env), channel).unwrap();
+            m.send("l1", "make two files".into(), vec![]).unwrap();
+            wait_for(&events, "\"kind\":\"approval\"", 1);
+            let id = {
+                let e = events.lock().unwrap();
+                let card = e.iter().find(|s| s.contains("\"kind\":\"approval\"")).unwrap().clone();
+                serde_json::from_str::<serde_json::Value>(&card).unwrap()["id"].as_str().unwrap().to_string()
+            };
+            let allowed = m.set_permission_live("l1", Permission::Full).unwrap();
+            assert_eq!(allowed, vec![id], "the waiting card is allowed by the switch");
+            wait_for(&events, "turn_done", 1);
+        });
+        let e = events.lock().unwrap();
+        assert_eq!(e.iter().filter(|s| s.contains("\"kind\":\"approval\"")).count(), 1, "the second command didn't ask: {e:?}");
+        assert!(!e.iter().any(|s| s.contains("couldn't change the permission")), "{e:?}");
+        assert!(dir.join("a.txt").exists() && dir.join("b.txt").exists(), "both commands ran: {e:?}");
         m.kill_all();
     }
 

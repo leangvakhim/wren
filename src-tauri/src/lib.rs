@@ -115,8 +115,13 @@ fn answer_question(state: State<'_, Manager>, pane_id: String, id: String, answe
 
 /// Change Manual / Auto / Plan / Full access; the conversation continues.
 #[tauri::command]
-fn set_permission(state: State<'_, Manager>, pane_id: String, permission: Permission) -> Result<(), String> {
-    state.set_permission(&pane_id, permission)
+/// `live` = the pane is working: change it without stopping the task, and
+/// return the ids of the approval cards that were allowed by the switch.
+fn set_permission(state: State<'_, Manager>, pane_id: String, permission: Permission, live: Option<bool>) -> Result<Vec<String>, String> {
+    if live == Some(true) {
+        return state.set_permission_live(&pane_id, permission);
+    }
+    state.set_permission(&pane_id, permission).map(|_| vec![])
 }
 
 /// "Browser for the AI" on or off; the conversation continues.

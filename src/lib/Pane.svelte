@@ -330,7 +330,10 @@
       if (seg.user) out.push({ kind: 'msg', m: seg.user });
       // An AI message is a step if more tool work follows it in this turn.
       const lastTool = seg.rest.map((m) => m.role).lastIndexOf('tool');
-      const steps = seg.rest.filter((m, j) => m.role === 'tool' || (m.role === 'assistant' && j < lastTool));
+      // Answered approval cards and question forms move into the steps too, so the chat stays clean.
+      const steps = seg.user
+        ? seg.rest.filter((m, j) => m.role === 'tool' || (m.role === 'assistant' && j < lastTool) || settledCard(m) || (m.role === 'info' && m.step))
+        : [];
       const live = last && busy && !!seg.user;
       if (seg.user && (steps.length || live)) {
         out.push({ kind: 'group', key: seg.user.id, steps, live, durationMs: seg.user.durationMs });
@@ -339,6 +342,42 @@
     });
     return out;
   });
+
+  /** An approval card or question form that needs nothing more from you. */
+  function settledCard(m: Msg): boolean {
+    if (m.role === 'approval') return m.approvalState !== 'waiting' && m.approvalState !== 'refused';
+    if (m.role === 'question') return m.questionState !== 'waiting';
+    return false;
+  }
+
+  /** One-line label for an answered card in the steps. */
+  function cardLabel(m: Msg): { label: string; subject: string; bad: boolean } {
+    if (m.role === 'question') {
+      const n = m.questions?.length ?? 0;
+      const subject = (m.questions ?? []).map((q) => q.header || q.question).join(' · ');
+      const label =
+        m.questionState === 'answered' ? `Answered ${n === 1 ? 'a question' : `${n} questions`}` : m.questionState === 'skipped' ? 'Skipped questions' : 'Questions not answered';
+      return { label, subject, bad: false };
+    }
+    const plan = m.tool === 'ExitPlanMode';
+    const subject = plan ? 'Plan' : `${m.tool}: ${m.text.split('\n')[0]}`;
+    switch (m.approvalState) {
+      case 'allowed':
+        return { label: plan ? 'Started the plan' : 'Allowed', subject, bad: false };
+      case 'allowed_session':
+        return { label: 'Allowed for this chat', subject, bad: false };
+      case 'auto_allowed':
+        return { label: `Allowed by ${m.autoBy ?? 'the new permission'}`, subject, bad: false };
+      case 'denied':
+        return { label: plan ? 'Kept planning' : 'Denied', subject, bad: true };
+      case 'retried':
+        return { label: 'Retried with Auto', subject, bad: false };
+      case 'kept':
+        return { label: 'Kept refused', subject, bad: true };
+      default:
+        return { label: 'Not answered', subject, bad: false };
+    }
+  }
 
   /** The latest turn (from the last message you sent) is shown on its own, at least one screen tall, so it can sit at the top like in Claude Desktop. */
   const itemKey = (it: Item) => (it.kind === 'group' ? `g${it.key}` : it.m.id);
@@ -542,17 +581,47 @@
     invoke('set_permission', { paneId, permission: p }).catch(() => {});
   }
 
-  /** Changing the permission keeps the conversation. */
+  /** The permission was changed during a task: restart the CLI in the new mode when the task ends. */
+  let permissionChangedLive = false;
+
+  /** Changing the permission keeps the conversation; during a task it applies without stopping it. */
   async function changePermission() {
-    const label = PERMISSIONS.find((p) => p.value === config.permission)?.label;
+    const label = PERMISSIONS.find((p) => p.value === config.permission)?.label ?? config.permission;
     if (!opened) return;
+    // Your own choice wins over "Allow & retry" going back afterwards.
+    revertPermission = null;
     try {
-      await invoke('set_permission', { paneId, permission: config.permission });
-      push({ role: 'info', text: `Permission: ${label}. The conversation continues.` });
+      if (busy) {
+        const allowed = await invoke<string[]>('set_permission', { paneId, permission: config.permission, live: true });
+        for (const m of messages) {
+          if (m.role === 'approval' && m.approvalState === 'waiting' && m.approvalId && allowed.includes(m.approvalId)) {
+            m.approvalState = 'auto_allowed';
+            m.autoBy = label;
+          }
+        }
+        permissionChangedLive = true;
+        const how =
+          config.provider === 'claude'
+            ? 'for the rest of this task'
+            : config.provider === 'codex'
+              ? `for Codex's remaining requests in this task; fully from your next message`
+              : `from your next message (${providerLabel} can't change it during a task)`;
+        push({ role: 'info', step: true, text: `Permission changed to ${label} ${how}.` });
+      } else {
+        await invoke('set_permission', { paneId, permission: config.permission });
+        push({ role: 'info', text: `Permission: ${label}. The conversation continues.` });
+      }
       persist();
     } catch (e) {
       push({ role: 'error', text: String(e) });
     }
+  }
+
+  /** After a task in which the permission changed, the next message starts the CLI in the new mode (same conversation). */
+  function applyPermissionAfterTurn() {
+    if (!permissionChangedLive) return;
+    permissionChangedLive = false;
+    invoke('set_permission', { paneId, permission: config.permission }).catch(() => {});
   }
 
   const elapsed = $derived.by(() => {
@@ -866,6 +935,7 @@
         expireApprovals();
         endTurn();
         revertAfterRetry();
+        applyPermissionAfterTurn();
         usageLog.push({
           t: Date.now(),
           provider: config.provider,
@@ -918,6 +988,8 @@
         break;
       case 'exited':
         streamingId = null;
+        // The next message starts a new process with the current permission anyway.
+        permissionChangedLive = false;
         expireApprovals();
         if (busy) endTurn();
         if (pendingLimit) {
@@ -1076,6 +1148,7 @@
   async function stop() {
     try {
       await invoke('stop_pane', { paneId });
+      permissionChangedLive = false;
       busy = false;
       streamingId = null;
       expireApprovals();
@@ -1342,8 +1415,7 @@
     <select
       id={`${paneId}-perm`}
       bind:value={config.permission}
-      disabled={busy}
-      title={permHint}
+      title={busy ? `${permHint} You can change it while it works.` : permHint}
       class:danger={config.permission === 'full'}
       onchange={changePermission}
     >
@@ -1496,6 +1568,20 @@
                       {#if m.result !== undefined}<pre class="sout">{m.result || '(no output)'}</pre>{:else}<p class="snone">{it.live ? 'Still running…' : 'No result.'}</p>{/if}
                     </div>
                   </details>
+                {:else if m.role === 'approval' || m.role === 'question'}
+                  {@const cl = cardLabel(m)}
+                  <details class="srow card" class:err={cl.bad}>
+                    <summary>
+                      <span class="slabel">{cl.label}</span>
+                      {#if cl.subject}<span class="ssubject">{cl.subject}</span>{/if}
+                      <svg class="schev" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+                    </summary>
+                    <div class="sbody">
+                      {#if m.role === 'approval'}{@render approvalCard(m)}{:else}{@render questionCard(m)}{/if}
+                    </div>
+                  </details>
+                {:else if m.role === 'info'}
+                  <div class="snote">{m.text}</div>
                 {:else}
                   <div class="snote md">{@html renderMarkdown(m.text)}</div>
                 {/if}
@@ -1535,57 +1621,9 @@
         {:else if m.role === 'error'}
           <div class="msg error" role="alert">{m.text}</div>
         {:else if m.role === 'approval'}
-        <div class="msg approval" class:waiting={m.approvalState === 'waiting' || m.approvalState === 'refused'} role={m.approvalState === 'waiting' ? 'alertdialog' : 'group'} aria-label={`${m.tool} approval`}>
-          <div class="ahead">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-            {#if m.approvalState === 'refused' || m.approvalState === 'retried' || m.approvalState === 'kept'}
-              <span><b>{m.tool}</b> refused an action that needs your permission (it can't ask in this mode)</span>
-            {:else if m.tool === 'ExitPlanMode'}
-              <span><b>Plan ready</b>: {m.text}</span>
-            {:else}
-              <span><b>{m.tool}</b> wants to:</span>
-            {/if}
-          </div>
-          {#if m.tool !== 'ExitPlanMode'}<pre class="acmd">{m.text}</pre>{/if}
-          {#if m.detail}
-            {#if m.tool === 'ExitPlanMode'}
-              <div class="aplan md">{@html renderMarkdown(m.detail)}</div>
-            {:else}
-              <p class="adetail">{m.detail}</p>
-            {/if}
-          {/if}
-          {#if m.approvalState === 'waiting'}
-            <div class="abtns">
-              <button class="primary" onclick={() => answerApproval(m, 'allow')}>{m.tool === 'ExitPlanMode' ? 'Start' : 'Allow'}</button>
-              {#if m.allowSession && m.tool !== 'ExitPlanMode'}
-                <button class="ghost" onclick={() => answerApproval(m, 'allow_session')} title="Allow this kind of action for the rest of this conversation">Allow for this chat</button>
-              {/if}
-              <button class="ghost" onclick={() => answerApproval(m, 'deny')}>{m.tool === 'ExitPlanMode' ? 'Keep planning' : 'Deny'}</button>
-            </div>
-          {:else if m.approvalState === 'refused'}
-            <div class="abtns">
-              <button class="primary" disabled={busy} onclick={() => allowAndRetry(m)} title="Send your last message again with Auto for one turn">Allow &amp; retry</button>
-              <button class="ghost" onclick={() => { m.approvalState = 'kept'; persist(); }}>Keep refused</button>
-            </div>
-          {:else}
-            <p class={`astate ${m.approvalState}`}>
-              {#if m.approvalState === 'allowed'}✓ Allowed
-              {:else if m.approvalState === 'allowed_session'}✓ Allowed for this chat
-              {:else if m.approvalState === 'denied'}✗ Denied
-              {:else if m.approvalState === 'retried'}↻ Retried with Auto for one turn
-              {:else if m.approvalState === 'kept'}✗ Kept refused
-              {:else}No longer waiting (the task ended or was stopped){/if}
-            </p>
-          {/if}
-        </div>
+          {@render approvalCard(m)}
         {:else if m.role === 'question'}
-          <QuestionCard
-            who={m.tool ?? PROVIDERS[config.provider].label}
-            questions={m.questions ?? []}
-            status={m.questionState ?? 'expired'}
-            answers={m.answers}
-            onsubmit={(a) => answerQuestion(m, a)}
-          />
+          {@render questionCard(m)}
         {:else if m.role === 'visual'}
           <div class="visual">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="m10 8.5 4.5 2.5-4.5 2.5z" /><path d="M8 21h8" /></svg>
@@ -1600,6 +1638,63 @@
           <div class="msg info">{m.text}</div>
         {/if}
       {/if}
+  {/snippet}
+
+  {#snippet approvalCard(m: Msg)}
+    <div class="msg approval" class:waiting={m.approvalState === 'waiting' || m.approvalState === 'refused'} role={m.approvalState === 'waiting' ? 'alertdialog' : 'group'} aria-label={`${m.tool} approval`}>
+      <div class="ahead">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
+        {#if m.approvalState === 'refused' || m.approvalState === 'retried' || m.approvalState === 'kept'}
+          <span><b>{m.tool}</b> refused an action that needs your permission (it can't ask in this mode)</span>
+        {:else if m.tool === 'ExitPlanMode'}
+          <span><b>Plan ready</b>: {m.text}</span>
+        {:else}
+          <span><b>{m.tool}</b> wants to:</span>
+        {/if}
+      </div>
+      {#if m.tool !== 'ExitPlanMode'}<pre class="acmd">{m.text}</pre>{/if}
+      {#if m.detail}
+        {#if m.tool === 'ExitPlanMode'}
+          <div class="aplan md">{@html renderMarkdown(m.detail)}</div>
+        {:else}
+          <p class="adetail">{m.detail}</p>
+        {/if}
+      {/if}
+      {#if m.approvalState === 'waiting'}
+        <div class="abtns">
+          <button class="primary" onclick={() => answerApproval(m, 'allow')}>{m.tool === 'ExitPlanMode' ? 'Start' : 'Allow'}</button>
+          {#if m.allowSession && m.tool !== 'ExitPlanMode'}
+            <button class="ghost" onclick={() => answerApproval(m, 'allow_session')} title="Allow this kind of action for the rest of this conversation">Allow for this chat</button>
+          {/if}
+          <button class="ghost" onclick={() => answerApproval(m, 'deny')}>{m.tool === 'ExitPlanMode' ? 'Keep planning' : 'Deny'}</button>
+        </div>
+      {:else if m.approvalState === 'refused'}
+        <div class="abtns">
+          <button class="primary" disabled={busy} onclick={() => allowAndRetry(m)} title="Send your last message again with Auto for one turn">Allow &amp; retry</button>
+          <button class="ghost" onclick={() => { m.approvalState = 'kept'; persist(); }}>Keep refused</button>
+        </div>
+      {:else}
+        <p class={`astate ${m.approvalState}`}>
+          {#if m.approvalState === 'allowed'}✓ Allowed
+          {:else if m.approvalState === 'allowed_session'}✓ Allowed for this chat
+          {:else if m.approvalState === 'auto_allowed'}✓ Allowed when you switched to {m.autoBy ?? 'another permission'}
+          {:else if m.approvalState === 'denied'}✗ Denied
+          {:else if m.approvalState === 'retried'}↻ Retried with Auto for one turn
+          {:else if m.approvalState === 'kept'}✗ Kept refused
+          {:else}No longer waiting (the task ended or was stopped){/if}
+        </p>
+      {/if}
+    </div>
+  {/snippet}
+
+  {#snippet questionCard(m: Msg)}
+    <QuestionCard
+      who={m.tool ?? PROVIDERS[config.provider].label}
+      questions={m.questions ?? []}
+      status={m.questionState ?? 'expired'}
+      answers={m.answers}
+      onsubmit={(a) => answerQuestion(m, a)}
+    />
   {/snippet}
 
   <footer class="composer">
@@ -1839,6 +1934,8 @@
   .sout { color: var(--muted); }
   .snone { margin: 0; color: var(--muted); font-size: 12px; }
   .snote { padding: 9px 12px; font-size: 13px; color: var(--muted); }
+  /* An answered card inside the steps: the full card when opened. */
+  .srow.card .sbody { padding-top: 2px; }
   .empty {
     margin: auto;
     text-align: center;
@@ -1873,7 +1970,7 @@
   .abtns { display: flex; gap: 8px; flex-wrap: wrap; }
   .abtns button { min-height: 32px; }
   .astate { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }
-  .astate.allowed, .astate.allowed_session { color: var(--ok); }
+  .astate.allowed, .astate.allowed_session, .astate.auto_allowed { color: var(--ok); }
   .astate.denied, .astate.kept { color: var(--danger); }
   .divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0; }
   .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }

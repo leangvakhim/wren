@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::providers::Permission;
+
 /// What the user decided on an approval card.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +36,27 @@ pub enum Pending {
     /// Codex asking to run an MCP tool (e.g. the browser tool): an
     /// `mcpServer/elicitation/request` with `codex_approval_kind` = "mcp_tool_call".
     CodexMcpTool { rpc_id: Value },
+}
+
+impl Pending {
+    /// A question form (not an approval).
+    pub fn is_question(&self) -> bool {
+        matches!(self, Pending::ClaudeQuestion { .. } | Pending::CodexQuestion { .. })
+    }
+}
+
+/// Allow a waiting request because the user switched to Auto / Full access.
+/// Claude's plan card also tells Claude to go on in that mode (`claude_mode`),
+/// so leaving plan mode doesn't undo the switch.
+pub fn reply_switched(p: &Pending, claude_mode: &str) -> String {
+    match p {
+        Pending::Claude { request_id, tool, input, .. } if tool == "ExitPlanMode" => {
+            let response = json!({"behavior": "allow", "updatedInput": input,
+                "updatedPermissions": [{"type": "setMode", "mode": claude_mode, "destination": "session"}]});
+            format!("{}\n", json!({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}}))
+        }
+        _ => reply(p, Decision::Allow),
+    }
 }
 
 /// The user's answers on a question form, by question id. `None` = skipped.
@@ -82,6 +105,10 @@ pub struct LinkState {
     pub pending: HashMap<String, Pending>,
     /// Counter for JSON-RPC request ids Wren sends.
     pub next_id: u64,
+    /// Set when the user changes the permission while this process runs
+    /// (the process was started with another one). The parser answers new
+    /// requests by it; the next process is started with it.
+    pub permission: Option<Permission>,
 }
 
 pub type Link = Arc<Mutex<LinkState>>;
@@ -189,6 +216,21 @@ mod tests {
         assert_eq!(v["id"], 12);
         assert_eq!(v["result"]["answers"]["db"]["answers"][0], "Postgres");
         assert!(reply_answers(&Pending::Codex { rpc_id: json!(1), session_ok: true }, &None).is_none());
+    }
+
+    #[test]
+    fn switched_replies() {
+        let plan = Pending::Claude { request_id: "p1".into(), tool: "ExitPlanMode".into(), input: json!({"plan": "x"}), suggestions: vec![] };
+        let v: Value = serde_json::from_str(reply_switched(&plan, "bypassPermissions").trim()).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "allow");
+        assert_eq!(v["response"]["response"]["updatedPermissions"][0]["mode"], "bypassPermissions");
+        let bash = Pending::Claude { request_id: "b1".into(), tool: "Bash".into(), input: json!({"command": "ls"}), suggestions: vec![] };
+        assert_eq!(reply_switched(&bash, "auto"), reply(&bash, Decision::Allow));
+        let codex = Pending::Codex { rpc_id: json!(3), session_ok: true };
+        let v: Value = serde_json::from_str(reply_switched(&codex, "auto").trim()).unwrap();
+        assert_eq!(v["result"]["decision"], "accept");
+        assert!(Pending::CodexQuestion { rpc_id: json!(1) }.is_question());
+        assert!(!codex.is_question());
     }
 
     #[test]
