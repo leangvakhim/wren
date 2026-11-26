@@ -194,7 +194,7 @@ How each CLI isolates an account (research, 2026-11-23; verify on the Mac):
 
 ## Status
 
-**All AGENTS-local tasks are marked (done) except #13 (suspend).** v0.1.1 is published on GitHub (all 7 builds + latest.json + .sig files). The question forms and conversation-keeping switch are pushed to main but NOT released yet (next: v0.1.2).
+**All AGENTS-local tasks are marked (done) except #13 (suspend).** v0.1.2 is published on GitHub (17 assets; latest.json = 0.1.2 for macOS arm64/x64, Linux, Windows; stray drafts removed). User confirmed on 2026-11-26 that it works.
 - #17 (subscription usage per account: 5h cap and daily) and #18 (Study + Deep research) were built on 2026-11-24 after the user confirmed: Antigravity = local count + Open /usage button; show limits in Accounts, pane footer, Usage window, and warnings at 80/95%; Study = tutor; Deep research = chat + report saved in the project folder.
 - #13 (website wren.leangvakhim.com): (suspend). Do nothing until the user removes the mark.
 Checks (2026-11-24): svelte-check 0/0, vite build, clippy 0 warnings, cargo test 26 passing (+ real-CLI test), limits tests passing. UI screenshot-checked with a mocked backend (light/dark: pane meters + warnings, + menu, Accounts bars, Usage plan-limit cards + daily table, a simulated research turn saving its report).
@@ -241,3 +241,4 @@ Still unverified on the Mac: real plan-limit numbers from signed-in accounts (sh
 - 2026-11-26: User pushed the work. Checked GitHub: release run v0.1.1 succeeded and the release is published with all installers + latest.json. Marked "Deploy it as an app" (done). Next: release v0.1.2 so installed copies get the new features.
 - 2026-11-26: User asked for Claude Desktop-style growing message box, copy buttons on commands, the new question rolling up to the top, and (from my questions) collapsing long sent messages. Asked 4 QCM (all A); built and checked them in a mocked UI. svelte-check 0/0, vite build OK. Not released yet (v0.1.2 pending).
 - 2026-11-26: Tags v0.1.2/v0.1.3 had been pushed without bumping the version, so both runs built 0.1.1 again into DRAFT releases named "Wren v0.1.1" (tauri-action names the release from tauri.conf.json, `tagName: v__VERSION__`). User chose to clean up: deleted the two tags, set 0.1.2 in package.json, package-lock.json, tauri.conf.json, Cargo.toml, Cargo.lock, added a workflow step that fails when the tag and the three version files differ, retagged v0.1.2. The user deletes the two stray drafts on GitHub and publishes the new v0.1.2 draft. **Releasing = bump all version files first, then tag.**
+- 2026-11-26: User confirmed "it works now for all". Checked GitHub: v0.1.2 published (17 assets), v0.1.1 published, no stray drafts, latest.json serves 0.1.2 on every platform.
