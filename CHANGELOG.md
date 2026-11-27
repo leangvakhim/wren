@@ -5,6 +5,14 @@ for the version being released to the top of the GitHub release notes, and
 Wren shows it in the update window ("What's new"). Add a section before
 tagging a new version.
 
+## 0.1.10
+
+- Codex chats now stay only in Wren: Codex no longer saves them in its own
+  history, so they don't show up in the Codex app. If Codex has to start
+  again in the middle of a chat, Wren gives it the earlier messages from its
+  own copy. Settings → Privacy → "Keep Codex chats only in Wren" (on by
+  default). Chats from earlier versions stay in Codex's history.
+
 ## 0.1.9
 
 - Notifications: Wren tells you when a pane needs your approval, asks you a

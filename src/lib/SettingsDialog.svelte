@@ -150,6 +150,20 @@
   </section>
 
   <section>
+    <h3>Privacy</h3>
+    <label class="check first">
+      <input type="checkbox" bind:checked={settings.codexPrivate} onchange={saveSettings} />
+      <span><b>Keep Codex chats only in Wren</b><br /><small>Codex doesn't save them in its own history, so they don't show up in the Codex app.</small></span>
+    </label>
+    <p class="note">
+      When Codex has to start again in the middle of a chat (Stop, another model or folder, reopening it from the
+      sidebar), Wren gives it the earlier messages from its own copy. Codex then remembers what was said, but not the
+      full output of commands it ran before. Applies the next time a pane starts Codex. Chats Wren made earlier stay in
+      Codex's history.
+    </p>
+  </section>
+
+  <section>
     <h3>Updates</h3>
     <div class="row center">
       <span class="ver">Wren {updater.current || '…'}</span>

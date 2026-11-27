@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::events::UiEvent;
 use crate::attachments::Outgoing;
 use crate::link::{new_link, reply, reply_answers, reply_switched, Answers, Decision, Link};
-use crate::providers::{codex_thread_request, Mode, Parser, Permission, Provider};
+use crate::providers::{codex_history_items, codex_thread_request, HistoryTurn, Mode, Parser, Permission, Provider};
 
 pub const MAX_PANES: usize = 4;
 const MAX_STDERR_LINES: usize = 200;
@@ -47,6 +47,16 @@ pub struct PaneConfig {
     /// for this session only.
     #[serde(default)]
     pub ai_browser: bool,
+    /// Codex keeps the conversation in memory only: nothing goes into its
+    /// own history (~/.codex, the Codex app). Wren's copy is the only one.
+    #[serde(default)]
+    pub codex_private: bool,
+}
+
+impl PaneConfig {
+    fn private_codex(&self) -> bool {
+        self.provider == Provider::Codex && self.codex_private
+    }
 }
 
 struct Running {
@@ -74,6 +84,8 @@ struct Session {
     attach_dir: Option<String>,
     /// Where the AI's browser tool saves screenshots.
     browser_dir: Option<String>,
+    /// Private Codex: the conversation so far, for the next process's new thread.
+    history: Vec<HistoryTurn>,
 }
 
 impl Session {
@@ -138,6 +150,7 @@ impl Manager {
                 link: new_link(true),
                 attach_dir: self.attach_dir.lock().ok().and_then(|d| d.clone()),
                 browser_dir: self.browser_dir.lock().ok().and_then(|d| d.clone()),
+                history: vec![],
             },
         );
         Ok(())
@@ -160,7 +173,23 @@ impl Manager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn send(&self, pane_id: &str, text: String, files: Vec<Outgoing>) -> Result<(), String> {
+        self.send_with_history(pane_id, text, files, vec![], None)
+    }
+
+    /// `history` = Wren's copy of the conversation before this message. Only
+    /// used by a private Codex pane whose CLI has to start again (its new
+    /// thread doesn't know the earlier turns). `codex_private` = the setting
+    /// right now; it applies when the CLI (re)starts.
+    pub fn send_with_history(
+        &self,
+        pane_id: &str,
+        text: String,
+        files: Vec<Outgoing>,
+        history: Vec<HistoryTurn>,
+        codex_private: Option<bool>,
+    ) -> Result<(), String> {
         let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
         let s = map.get_mut(pane_id).ok_or("unknown pane")?;
         if s.cfg.cwd.is_empty() {
@@ -175,6 +204,10 @@ impl Manager {
             _ => text,
         };
         if !s.is_running() {
+            if let Some(p) = codex_private {
+                s.cfg.codex_private = p;
+            }
+            s.history = history;
             spawn(s)?;
         }
         let tx = s.run.as_ref().and_then(|r| r.stdin_tx.as_ref()).ok_or("CLI is not accepting input")?;
@@ -449,11 +482,16 @@ fn spawn(s: &mut Session) -> Result<(), String> {
     let stdout = child.stdout.take().ok_or("no stdout")?;
     // A fresh link per process: old approval requests can't be answered any more.
     s.link = new_link(!provider.needs_handshake());
-    let fallback = (provider == Provider::Codex && resume.is_some())
-        .then(|| format!("{}\n", codex_thread_request("thread/start", s.cfg.permission, &s.cfg.cwd, None)));
+    let private = s.cfg.private_codex();
+    let history = std::mem::take(&mut s.history);
+    if private {
+        s.link.lock().map_err(|e| e.to_string())?.inject = Some(codex_history_items(&history));
+    }
+    let fallback = (provider == Provider::Codex && resume.is_some() && !private)
+        .then(|| format!("{}\n", codex_thread_request("thread/start", s.cfg.permission, &s.cfg.cwd, None, false)));
     let mut parser = Parser::new(provider, s.provider_session.clone(), s.link.clone(), fallback).for_permission(s.cfg.permission);
     if let Some(tx) = &stdin_tx {
-        for m in provider.startup_messages(s.cfg.permission, &s.cfg.cwd, resume.as_deref()) {
+        for m in provider.startup_messages(s.cfg.permission, &s.cfg.cwd, resume.as_deref(), private) {
             let _ = tx.send(m);
         }
     }
@@ -665,6 +703,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let m = Manager::default();
         let (_events, ch) = collector();
@@ -701,6 +740,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let card_id = |events: &Arc<Mutex<Vec<String>>>, n: usize| {
             let e = events.lock().unwrap();
@@ -772,6 +812,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let cfgdir = std::env::temp_dir().join(format!("wren-manual-{}", std::process::id()));
         let env = vec![
@@ -828,6 +869,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), api),
@@ -882,6 +924,7 @@ mod tests {
                 mode: None,
                 github_account_id: None,
                 ai_browser: false,
+            codex_private: false,
             };
             let env = vec![
                 ("ANTHROPIC_BASE_URL".to_string(), api.clone()),
@@ -937,6 +980,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -990,6 +1034,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let m = Manager::default();
         let (events, ch) = collector();
@@ -1022,6 +1067,72 @@ mod tests {
     }
 
     #[test]
+    /// Private Codex with the real CLI (WREN_FAKE_OPENAI, WREN_FAKE_LOG): the
+    /// conversation never reaches Codex's own files, and after a stop the new
+    /// thread still knows the earlier turn (Wren's copy).
+    fn real_codex_private() {
+        let (Ok(api), Ok(log)) = (std::env::var("WREN_FAKE_OPENAI"), std::env::var("WREN_FAKE_LOG")) else { return };
+        let dir = std::env::temp_dir().join(format!("wren-cxprivate-{}", std::process::id()));
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!("model = \"gpt-fake\"\nmodel_provider = \"fake\"\n[model_providers.fake]\nname = \"fake\"\nbase_url = \"{api}\"\nenv_key = \"FAKE_KEY\"\nwire_api = \"responses\"\n"),
+        )
+        .unwrap();
+        let env = Ok(vec![("CODEX_HOME".to_string(), home.to_string_lossy().to_string()), ("FAKE_KEY".to_string(), "x".to_string())]);
+        let cfg = PaneConfig {
+            provider: Provider::Codex,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Auto,
+            account_id: None,
+            model: None,
+            effort: None,
+            mode: None,
+            github_account_id: None,
+            ai_browser: false,
+            codex_private: true,
+        };
+        let m = Manager::default();
+        let (events, ch) = collector();
+        let _ = std::fs::remove_file(&log);
+        tauri::async_runtime::block_on(async {
+            m.open("v1".into(), cfg, env, ch).unwrap();
+            m.send("v1", "remember the word PELICAN".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 1);
+            m.stop("v1").unwrap();
+            wait_for(&events, "exited", 1);
+            let history = vec![
+                HistoryTurn { role: "user".into(), text: "remember the word PELICAN".into() },
+                HistoryTurn { role: "assistant".into(), text: "ok".into() },
+            ];
+            m.send_with_history("v1", "which word?".into(), vec![], history, None).unwrap();
+            wait_for(&events, "turn_done", 2);
+        });
+        m.kill_all();
+        let all = events.lock().unwrap().join("\n");
+        assert!(!all.contains("couldn't load"), "{all}");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        let last = sent.lines().last().unwrap();
+        assert!(last.contains("PELICAN") && last.contains("which word?"), "the new thread got the earlier turn: {sent}");
+        // Nothing of the chat in Codex's own folder (history, state, logs).
+        let mut found = vec![];
+        fn walk(p: &std::path::Path, found: &mut Vec<String>) {
+            for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if std::fs::read(&path).map(|b| b.windows(7).any(|w| w == b"PELICAN")).unwrap_or(false) {
+                    found.push(path.display().to_string());
+                }
+            }
+        }
+        walk(&home, &mut found);
+        assert!(found.is_empty(), "chat text found in {found:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     /// The real Claude Code against a fake API (WREN_FAKE_API=<url>): a "hi" that
     /// makes Claude run a command (denied on its card) must still end its
     /// turn.
@@ -1048,6 +1159,7 @@ mod tests {
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
         let env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), api),
@@ -1091,7 +1203,8 @@ done
 echo "ARGS $*" >&2
 while read -r line; do
   case "$line" in
-    *'"thread/start"'*) echo '{"id":"thread","result":{"thread":{"id":"t9"},"model":"fake"}}' ;;
+    *'"thread/inject_items"'*) echo "INJECT $line" >&2; echo '{"id":"inject","result":{}}' ;;
+    *'"thread/start"'*) echo "START $line" >&2; echo '{"id":"thread","result":{"thread":{"id":"t9"},"model":"fake"}}' ;;
     *'"thread/resume"'*) echo "RESUME $line" >&2; echo '{"id":"thread","result":{"thread":{"id":"t9"},"model":"fake"}}' ;;
     *'"turn/start"'*)
       echo "TURN $line" >&2
@@ -1130,6 +1243,7 @@ done
             mode: None,
             github_account_id: None,
             ai_browser: false,
+            codex_private: false,
         };
 
         tauri::async_runtime::block_on(async {
@@ -1193,6 +1307,38 @@ done
             m.send("p2", "next".into(), vec![]).unwrap();
             wait_for(&events, "\"kind\":\"approval\"", 2);
             assert!(events.lock().unwrap().iter().any(|s| s.contains("RESUME") && s.contains("t9")));
+            m.answer("p2", "codex-41", Decision::Deny).unwrap();
+            wait_for(&events, "turn_done", 2);
+
+            // Private Codex: a new in-memory thread every time, given Wren's copy
+            // of the conversation before the waiting message.
+            events.lock().unwrap().clear();
+            m.update("p2", PaneConfig { codex_private: true, ..cfg(Provider::Codex) }, Ok(vec![])).unwrap();
+            let history = vec![
+                HistoryTurn { role: "user".into(), text: "remember PELICAN".into() },
+                HistoryTurn { role: "assistant".into(), text: "noted".into() },
+                HistoryTurn { role: "divider".into(), text: "skipped".into() },
+            ];
+            m.send_with_history("p2", "which word?".into(), vec![], history.clone(), None).unwrap();
+            wait_for(&events, "\"kind\":\"approval\"", 1);
+            {
+                let e = events.lock().unwrap();
+                let at = |k: &str| e.iter().position(|s| s.contains(k)).unwrap_or_else(|| panic!("{k}: {e:?}"));
+                assert!(e[at("START")].contains("ephemeral"), "{e:?}");
+                let inject = &e[at("INJECT")];
+                assert!(inject.contains("PELICAN") && inject.contains("output_text") && !inject.contains("skipped"), "{inject}");
+                assert!(at("INJECT") < at("TURN"), "history first, then the message: {e:?}");
+            }
+            // Stopped: no resume (nothing was saved), a new thread gets the history again.
+            m.stop("p2").unwrap();
+            wait_for(&events, "exited", 1);
+            m.send_with_history("p2", "again".into(), vec![], history, None).unwrap();
+            wait_for(&events, "\"kind\":\"approval\"", 2);
+            {
+                let e = events.lock().unwrap();
+                assert!(!e.iter().any(|s| s.contains("RESUME")), "{e:?}");
+                assert_eq!(e.iter().filter(|s| s.contains("INJECT")).count(), 2, "{e:?}");
+            }
             m.kill_all();
         });
         std::fs::remove_dir_all(&dir).ok();

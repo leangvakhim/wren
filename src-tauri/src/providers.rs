@@ -404,7 +404,9 @@ impl Provider {
 
     /// Lines written to stdin right after the CLI starts (Codex: initialize,
     /// then start or resume the thread). The thread answer has id "thread".
-    pub fn startup_messages(self, perm: Permission, cwd: &str, resume: Option<&str>) -> Vec<String> {
+    /// `private`: Codex keeps the thread in memory only (nothing in its
+    /// history), so there is nothing to resume: always a new thread.
+    pub fn startup_messages(self, perm: Permission, cwd: &str, resume: Option<&str>, private: bool) -> Vec<String> {
         if self != Provider::Codex {
             return vec![];
         }
@@ -416,8 +418,8 @@ impl Provider {
             json!({"jsonrpc": "2.0", "method": "initialized"}),
         ];
         out.push(match resume {
-            Some(id) => codex_thread_request("thread/resume", perm, cwd, Some(id)),
-            None => codex_thread_request("thread/start", perm, cwd, None),
+            Some(id) if !private => codex_thread_request("thread/resume", perm, cwd, Some(id), false),
+            _ => codex_thread_request("thread/start", perm, cwd, None, private),
         });
         out.into_iter().map(|v| format!("{v}\n")).collect()
     }
@@ -491,9 +493,13 @@ fn with_file_list(text: &str, files: &[&Outgoing]) -> String {
 }
 
 /// `thread/start` or `thread/resume` with the pane's folder and permission.
-pub fn codex_thread_request(method: &str, perm: Permission, cwd: &str, thread_id: Option<&str>) -> Value {
+/// `ephemeral`: the thread is never written to disk (not in Codex's history).
+pub fn codex_thread_request(method: &str, perm: Permission, cwd: &str, thread_id: Option<&str>, ephemeral: bool) -> Value {
     let (approval, sandbox, reviewer) = codex_policy(perm);
     let mut params = json!({"cwd": cwd, "approvalPolicy": approval, "sandbox": sandbox});
+    if ephemeral {
+        params["ephemeral"] = json!(true);
+    }
     if let Some(r) = reviewer {
         params["approvalsReviewer"] = json!(r);
     }
@@ -501,6 +507,43 @@ pub fn codex_thread_request(method: &str, perm: Permission, cwd: &str, thread_id
         params["threadId"] = json!(id);
     }
     json!({"jsonrpc": "2.0", "id": "thread", "method": method, "params": params})
+}
+
+/// One earlier message of a conversation (Wren's own copy), given back to a
+/// private Codex thread when it has to start again.
+#[derive(Deserialize, Clone, Debug)]
+pub struct HistoryTurn {
+    pub role: String,
+    pub text: String,
+}
+
+/// At most this much earlier text goes back into a new private Codex thread
+/// (the newest messages are kept).
+const MAX_HISTORY_CHARS: usize = 400_000;
+
+/// Wren's copy of the conversation as Responses API items for
+/// `thread/inject_items`: the model sees them as earlier turns.
+pub fn codex_history_items(turns: &[HistoryTurn]) -> Vec<Value> {
+    let mut items = vec![];
+    let mut total = 0;
+    for t in turns.iter().rev() {
+        let kind = match t.role.as_str() {
+            "user" => "input_text",
+            "assistant" => "output_text",
+            _ => continue,
+        };
+        let text = t.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        total += text.len();
+        if total > MAX_HISTORY_CHARS {
+            break;
+        }
+        items.push(json!({"type": "message", "role": t.role, "content": [{"type": kind, "text": text}]}));
+    }
+    items.reverse();
+    items
 }
 
 /// Turns one provider's output lines into UiEvents.
@@ -759,6 +802,18 @@ impl Parser {
     }
 
     // ---------------- Codex CLI (app-server, JSON-RPC) ----------------
+    /// The thread is ready: send the messages that were waiting for it.
+    fn codex_ready(&mut self, tid: &str) {
+        if let Ok(mut l) = self.link.lock() {
+            l.ready = true;
+            let queued = std::mem::take(&mut l.queued);
+            for (text, images) in queued {
+                l.next_id += 1;
+                self.replies.push(Provider::Codex.stdin_message(&text, &images, Some(tid), l.next_id));
+            }
+        }
+    }
+
     fn parse_codex(&mut self, v: &Value) -> Vec<UiEvent> {
         let mut out = vec![];
         let method = v["method"].as_str();
@@ -774,14 +829,15 @@ impl Parser {
                             session_id: tid.to_string(),
                             model: v["result"]["model"].as_str().map(String::from),
                         });
-                        // Ready: send the messages that were waiting for the thread.
-                        if let Ok(mut l) = self.link.lock() {
-                            l.ready = true;
-                            let queued = std::mem::take(&mut l.queued);
-                            for (text, images) in queued {
-                                l.next_id += 1;
-                                self.replies.push(Provider::Codex.stdin_message(&text, &images, Some(tid), l.next_id));
-                            }
+                        // A private thread starts empty: first give it Wren's copy of
+                        // the conversation, then send the waiting messages.
+                        let inject = self.link.lock().ok().and_then(|mut l| l.inject.take()).filter(|i| !i.is_empty());
+                        match inject {
+                            Some(items) => self.replies.push(format!(
+                                "{}\n",
+                                json!({"jsonrpc": "2.0", "id": "inject", "method": "thread/inject_items", "params": {"threadId": tid, "items": items}})
+                            )),
+                            None => self.codex_ready(tid),
                         }
                     } else if let Some(start) = self.fallback_start.take() {
                         // The old conversation couldn't be reopened: start a new one.
@@ -790,6 +846,14 @@ impl Parser {
                     } else {
                         out.push(UiEvent::Error { message: rpc_error(v, "Codex could not start a conversation.") });
                     }
+                } else if id == "inject" {
+                    if !v["error"].is_null() {
+                        out.push(UiEvent::Notice {
+                            text: format!("Codex couldn't load the earlier messages of this chat ({}).", rpc_error(v, "unknown error")),
+                        });
+                    }
+                    let tid = self.session_id.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
+                    self.codex_ready(&tid);
                 } else if id.starts_with("turn-") && !v["error"].is_null() {
                     out.push(UiEvent::TurnDone { usage: Usage::default(), cost_usd: None, error: Some(rpc_error(v, "Codex refused the message.")) });
                 } else if id == "init" && !v["error"].is_null() {
@@ -1285,15 +1349,20 @@ mod tests {
             a,
             ["app-server", "-c", "analytics.enabled=false", "-c", "feedback.enabled=false", "-c", "model=\"gpt-6.2-sol\"", "-c", "model_reasoning_effort=\"high\""]
         );
-        let start: Value = serde_json::from_str(Provider::Codex.startup_messages(Permission::Manual, "/p", None)[2].trim()).unwrap();
+        let start: Value = serde_json::from_str(Provider::Codex.startup_messages(Permission::Manual, "/p", None, false)[2].trim()).unwrap();
         assert_eq!(start["method"], "thread/start");
         assert_eq!(start["params"]["approvalPolicy"], "untrusted");
         assert_eq!(start["params"]["sandbox"], "read-only");
-        let resume: Value = serde_json::from_str(Provider::Codex.startup_messages(Permission::Auto, "/p", Some("t-1"))[2].trim()).unwrap();
+        let resume: Value = serde_json::from_str(Provider::Codex.startup_messages(Permission::Auto, "/p", Some("t-1"), false)[2].trim()).unwrap();
         assert_eq!(resume["method"], "thread/resume");
         assert_eq!(resume["params"]["threadId"], "t-1");
         assert_eq!(resume["params"]["approvalsReviewer"], "auto_review");
-        assert!(Provider::Claude.startup_messages(Permission::Manual, "/p", None).is_empty());
+        assert!(Provider::Claude.startup_messages(Permission::Manual, "/p", None, false).is_empty());
+        // Private: a new in-memory thread even when there is an old id.
+        let private: Value = serde_json::from_str(Provider::Codex.startup_messages(Permission::Auto, "/p", Some("t-1"), true)[2].trim()).unwrap();
+        assert_eq!(private["method"], "thread/start");
+        assert_eq!(private["params"]["ephemeral"], true);
+        assert!(private["params"]["threadId"].is_null());
 
         let c = Provider::Claude.args(Permission::Manual, Some("s1"), Some("opus"), Some("xhigh"), None);
         assert!(c.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "default"));
@@ -1516,5 +1585,37 @@ mod tests {
     fn non_json_becomes_log() {
         let (mut p, _) = parser(Provider::Claude);
         assert_eq!(p.parse("hello"), vec![UiEvent::Log { line: "hello".into() }]);
+    }
+
+    #[test]
+    fn history_items_keep_the_newest_chat_text() {
+        let t = |role: &str, text: &str| HistoryTurn { role: role.into(), text: text.into() };
+        let items = codex_history_items(&[t("user", "hi"), t("tool", "ls"), t("assistant", " hello "), t("user", "  ")]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}));
+        assert_eq!(items[1]["content"][0], json!({"type": "output_text", "text": "hello"}));
+        // Too long: the oldest messages are dropped.
+        let big = "x".repeat(MAX_HISTORY_CHARS / 2 + 1);
+        let items = codex_history_items(&[t("user", "old"), t("user", &big), t("assistant", &big), t("user", "new")]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["content"][0]["text"], "new");
+    }
+
+    #[test]
+    fn private_codex_thread_gets_history_before_messages() {
+        let link = crate::link::new_link(false);
+        link.lock().unwrap().inject = Some(vec![json!({"type": "message"})]);
+        link.lock().unwrap().queued.push(("hello".into(), vec![]));
+        let mut p = Parser::new(Provider::Codex, Arc::new(Mutex::new(None)), link.clone(), None);
+        p.parse(r#"{"id":"thread","result":{"thread":{"id":"t-1"},"model":"m"}}"#);
+        let r = p.take_replies();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("thread/inject_items") && r[0].contains("\"threadId\":\"t-1\""));
+        assert!(!link.lock().unwrap().ready, "messages wait for the history");
+        let ev = p.parse(r#"{"id":"inject","error":{"code":-1,"message":"nope"}}"#);
+        assert!(matches!(&ev[0], UiEvent::Notice { text } if text.contains("nope")));
+        let r = p.take_replies();
+        assert!(r.len() == 1 && r[0].contains("turn/start") && r[0].contains("hello"));
+        assert!(link.lock().unwrap().ready);
     }
 }

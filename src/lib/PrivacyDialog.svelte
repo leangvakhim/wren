@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import LoginSheet from './LoginSheet.svelte';
   import { accounts, findAccount } from './accounts.svelte';
+  import { settings } from './settings.svelte';
   import type { Account, Provider } from './types';
 
   let { open = $bindable(false), installed }: { open: boolean; installed: Partial<Record<Provider, string | null>> } = $props();
@@ -48,7 +49,10 @@
       <h3>Turned off automatically by Wren</h3>
       <ul>
         <li><b>Claude Code:</b> telemetry, error reporting and feedback surveys.</li>
-        <li><b>Codex:</b> client analytics and feedback uploads.</li>
+        <li>
+          <b>Codex:</b> client analytics and feedback uploads{#if settings.codexPrivate}, and its own chat history: Codex
+            chats are kept only in Wren, not in Codex or the Codex app (Settings → Privacy){/if}.
+        </li>
         <li>
           <b>Antigravity:</b> needs a one-time switch inside agy. Open its settings, type <code>/config</code>, go to
           <b>Account</b> and turn <b>Enable Telemetry</b> off. Google says this is also the setting that stops your

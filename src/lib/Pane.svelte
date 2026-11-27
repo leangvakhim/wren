@@ -772,6 +772,23 @@
     });
   }
 
+  /** Codex keeps this chat in memory only (Settings → Privacy); Wren's copy is the only one. */
+  const privateCodex = () => config.provider === 'codex' && settings.codexPrivate;
+
+  /**
+   * The chat so far as plain text, for a private Codex thread that has to
+   * start again (Wren sends it with every message; Codex uses it only then).
+   * `request` = the message being sent, left out if it's a retry of the last one.
+   */
+  function codexHistory(request: string) {
+    const turns = recapSource()
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role, text: m.text }));
+    const last = turns.at(-1);
+    if (last?.role === 'user' && last.text === request) turns.pop();
+    return turns;
+  }
+
   /** "Claude Code · Work" for the pane's current AI and account. */
   const targetLabel = () => `${PROVIDERS[config.provider].label}${account ? ` · ${account.name}` : ''}`;
 
@@ -797,6 +814,22 @@
     stopWaiting();
     expireApprovals();
     const sameAI = config.provider === fromProvider;
+    if (sameAI && privateCodex()) {
+      // Nothing saved by Codex to carry: the new account's thread gets Wren's copy with the next message.
+      try {
+        await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+        markApplied();
+      } catch (e) {
+        push({ role: 'error', text: String(e) });
+        return false;
+      }
+      sessionId = null;
+      recapFrom = null;
+      push({ role: 'divider', text: `Continued with ${targetLabel()}` });
+      persist();
+      if (why === 'limit' && lastUserText) await sendText(lastUserText, lastUserText, lastUserFiles);
+      return true;
+    }
     if (sameAI && sessionId && fromAccount && config.accountId && config.provider !== 'antigravity') {
       try {
         const carried = await invoke<boolean>('carry_session', { fromAccount, toAccount: config.accountId, sessionId });
@@ -1299,8 +1332,10 @@
     if (opened && config.accountId !== appliedAccount) {
       try {
         await invoke('update_pane', { paneId, config: $state.snapshot(config) });
-        // The CLI starts fresh: the conversation so far goes along as a recap.
-        if (messages.some((m) => m.role === 'user') && !recapFrom) recapFrom = PROVIDERS[appliedProvider].label;
+        // The CLI starts fresh: the conversation so far goes along as a recap
+        // (a private Codex thread gets it with the message anyway).
+        const keeps = privateCodex() && appliedProvider === 'codex';
+        if (messages.some((m) => m.role === 'user') && !recapFrom && !keeps) recapFrom = PROVIDERS[appliedProvider].label;
         markApplied();
       } catch {}
     }
@@ -1321,6 +1356,8 @@
   /** Send `cliText` to the CLI; show `shownText` in the chat. `request` = what the user asked (re-sent by Continue / Allow & retry). */
   async function sendText(cliText: string, shownText: string, files: SentFile[] = [], request = cliText) {
     if (!convId) startConversation(shownText || files[0]?.name || 'Attachment');
+    // A recap (cliText differs from what's shown) already carries the chat.
+    const history = privateCodex() && cliText === shownText ? codexHistory(request) : undefined;
     if (!isRecapBubble(shownText)) {
       lastUserText = request;
       lastUserFiles = files;
@@ -1346,7 +1383,13 @@
       cliText = `(Note from Wren: the project folder for this conversation is now ${moved.to}. Earlier messages and file paths refer to ${moved.from}. Work in the new folder from now on.)\n\n${cliText}`;
     }
     try {
-      await invoke('send_message', { paneId, text: cliText, files: files.map((f) => f.path) });
+      await invoke('send_message', {
+        paneId,
+        text: cliText,
+        files: files.map((f) => f.path),
+        history,
+        codexPrivate: settings.codexPrivate,
+      });
     } catch (e) {
       folderMoved = moved;
       busy = false;

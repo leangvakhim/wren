@@ -287,13 +287,15 @@ async fn send_message(
     pane_id: String,
     text: String,
     files: Option<Vec<String>>,
+    history: Option<Vec<providers::HistoryTurn>>,
+    codex_private: Option<bool>,
 ) -> Result<(), String> {
     let paths = files.unwrap_or_default();
     if paths.len() > attachments::MAX_FILES {
         return Err(format!("At most {} files per message.", attachments::MAX_FILES));
     }
     let out = paths.iter().map(|p| store.outgoing(p)).collect::<Result<Vec<_>, _>>()?;
-    state.send(&pane_id, text, out)
+    state.send_with_history(&pane_id, text, out, history.unwrap_or_default(), codex_private)
 }
 
 /// Attach a pasted or dropped file: the raw bytes, with its name in the

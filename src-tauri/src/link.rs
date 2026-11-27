@@ -101,6 +101,9 @@ pub struct LinkState {
     pub ready: bool,
     /// User messages (text + images) waiting for `ready`.
     pub queued: Vec<(String, Vec<crate::attachments::Outgoing>)>,
+    /// Private Codex thread: Wren's copy of the conversation, given to the
+    /// new thread before the waiting messages.
+    pub inject: Option<Vec<serde_json::Value>>,
     /// Approval requests by Wren's id (shown on the cards).
     pub pending: HashMap<String, Pending>,
     /// Counter for JSON-RPC request ids Wren sends.

@@ -11,6 +11,11 @@ export interface Settings {
   waitIfNoOther: boolean;
   /** System notifications while Wren is in the back (per computer). */
   notify: NotifySettings;
+  /**
+   * Codex keeps chats in memory only (nothing in ~/.codex, so they don't show
+   * in the Codex app); Wren's saved copy is the only one.
+   */
+  codexPrivate: boolean;
 }
 
 export interface NotifySettings {
@@ -33,6 +38,7 @@ const DEFAULTS: Settings = {
   fallbackOrder: ['claude', 'codex', 'antigravity'],
   waitIfNoOther: true,
   notify: { enabled: true, approval: true, question: true, done: true, problems: true, sound: true },
+  codexPrivate: true,
 };
 
 function load(): Settings {
