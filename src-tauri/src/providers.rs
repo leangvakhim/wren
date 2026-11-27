@@ -389,6 +389,9 @@ impl Provider {
                 ("DISABLE_TELEMETRY", "1"),
                 ("DISABLE_ERROR_REPORTING", "1"),
                 ("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "1"),
+                // "running" / "idle" events: a `result` isn't the end while
+                // sub-agents or background commands still work.
+                ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1"),
             ],
             // Codex: analytics/feedback are turned off with -c flags (see args).
             // Antigravity: telemetry is a setting inside agy (/config ->
@@ -569,6 +572,14 @@ pub struct Parser {
     /// The permission this process was started with. The user may change it
     /// while the process runs (`LinkState::permission`).
     launched: Permission,
+    /// Claude: the CLI sends "running" / "idle" (CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).
+    /// Then "idle" ends the turn, not `result`.
+    claude_states: bool,
+    claude_running: bool,
+    /// Claude: `result`s of the current turn, reported together at "idle".
+    claude_held: Option<(Usage, Option<f64>, Option<String>)>,
+    /// Claude: `total_cost_usd` adds up over the whole process.
+    claude_cost: f64,
 }
 
 impl Parser {
@@ -583,6 +594,10 @@ impl Parser {
             codex_items: HashMap::new(),
             codex_total: Usage::default(),
             launched: Permission::Manual,
+            claude_states: false,
+            claude_running: false,
+            claude_held: None,
+            claude_cost: 0.0,
         }
     }
 
@@ -776,25 +791,51 @@ impl Parser {
                     out.push(UiEvent::PlanLimits { limits });
                 }
             }
+            "system" if v["subtype"] == "session_state_changed" => {
+                self.claude_states = true;
+                match v["state"].as_str() {
+                    // Also when Claude starts by itself, e.g. after a background
+                    // command or sub-agent finished.
+                    Some("running" | "requires_action") if !self.claude_running => {
+                        self.claude_running = true;
+                        out.push(UiEvent::TurnStarted);
+                    }
+                    Some("idle") if self.claude_running => {
+                        self.claude_running = false;
+                        let (usage, cost_usd, error) = self.claude_held.take().unwrap_or_default();
+                        out.push(UiEvent::TurnDone { usage, cost_usd, error });
+                    }
+                    _ => {}
+                }
+            }
             "result" => {
                 let u = &v["usage"];
                 let is_error = v["is_error"].as_bool().unwrap_or(false);
-                out.push(UiEvent::TurnDone {
-                    usage: Usage {
-                        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
-                        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                        cache_read_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
-                        cache_write_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-                    },
-                    cost_usd: v["total_cost_usd"].as_f64(),
-                    error: is_error.then(|| {
-                        v["result"]
-                            .as_str()
-                            .or(v["subtype"].as_str())
-                            .unwrap_or("error")
-                            .to_string()
-                    }),
+                let usage = Usage {
+                    input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+                    output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+                    cache_read_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                    cache_write_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                };
+                let cost_usd = v["total_cost_usd"].as_f64().map(|total| {
+                    let turn = (total - self.claude_cost).max(0.0);
+                    self.claude_cost = total;
+                    turn
                 });
+                let error = is_error.then(|| v["result"].as_str().or(v["subtype"].as_str()).unwrap_or("error").to_string());
+                if self.claude_states && self.claude_running {
+                    let held = self.claude_held.get_or_insert_default();
+                    held.0.input_tokens += usage.input_tokens;
+                    held.0.output_tokens += usage.output_tokens;
+                    held.0.cache_read_tokens += usage.cache_read_tokens;
+                    held.0.cache_write_tokens += usage.cache_write_tokens;
+                    if let Some(c) = cost_usd {
+                        held.1 = Some(held.1.unwrap_or(0.0) + c);
+                    }
+                    held.2 = error;
+                } else {
+                    out.push(UiEvent::TurnDone { usage, cost_usd, error });
+                }
             }
             _ => {}
         }
@@ -1259,6 +1300,32 @@ mod tests {
             }
             e => panic!("unexpected {e:?}"),
         }
+    }
+
+    /// Event order of real claude 2.1.310 with a background command: the first
+    /// `result` comes while the command still runs; after "idle" Claude starts
+    /// a new turn by itself when the command finishes.
+    #[test]
+    fn claude_turn_ends_at_idle_and_restarts_by_itself() {
+        let mut p = Parser::new(Provider::Claude, Arc::new(Mutex::new(None)), Link::default(), None);
+        let state = |s: &str| format!(r#"{{"type":"system","subtype":"session_state_changed","state":"{s}"}}"#);
+        let result = |cost: f64| format!(r#"{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":{cost},"usage":{{"input_tokens":10,"output_tokens":5}}}}"#);
+        assert_eq!(p.parse(&state("running")), vec![UiEvent::TurnStarted]);
+        // A sub-agent's held-back result: not the end yet.
+        assert!(p.parse(&result(0.5)).is_empty());
+        assert!(p.parse(&result(0.75)).is_empty());
+        let done = p.parse(&state("idle"));
+        let UiEvent::TurnDone { usage, cost_usd, error } = &done[0] else { panic!("{done:?}") };
+        assert_eq!((usage.input_tokens, usage.output_tokens, *cost_usd, error.is_none()), (20, 10, Some(0.75), true));
+        assert!(p.parse(&state("idle")).is_empty());
+        // The background command finished: Claude works again without a message.
+        assert!(p.parse(r#"{"type":"system","subtype":"task_notification"}"#).is_empty());
+        assert_eq!(p.parse(&state("running")), vec![UiEvent::TurnStarted]);
+        assert!(p.parse(&state("requires_action")).is_empty());
+        assert!(p.parse(&result(1.0)).is_empty());
+        let done = p.parse(&state("idle"));
+        // total_cost_usd adds up over the process: this turn cost 0.25.
+        assert!(matches!(&done[0], UiEvent::TurnDone { cost_usd: Some(c), .. } if (c - 0.25).abs() < 1e-9));
     }
 
     #[test]

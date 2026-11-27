@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "close_pane",
     "detect_clis",
     "default_folder",
+    "folder_kind",
     "data_folder",
     "list_accounts",
     "add_account",
@@ -60,6 +61,15 @@ const COMMANDS: &[&str] = &[
     "remove_github",
     "start_github_login",
     "reset_wren",
+    "remote_attach",
+    "remote_configure",
+    "remote_pair",
+    "remote_cancel_pair",
+    "remote_confirm",
+    "remote_remove_device",
+    "remote_rename_device",
+    "remote_send",
+    "remote_push",
 ];
 
 fn main() {

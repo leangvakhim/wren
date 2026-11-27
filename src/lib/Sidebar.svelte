@@ -1,4 +1,6 @@
 <script lang="ts">
+  import FolderIcon from './FolderIcon.svelte';
+  import FolderIconPicker from './FolderIconPicker.svelte';
   import { deleteConversation, history, renameConversation } from './history.svelte';
   import { PROVIDERS, type ConversationMeta } from './types';
 
@@ -21,6 +23,8 @@
   let renaming = $state<string | null>(null);
   let renameText = $state('');
   let confirmDelete = $state<string | null>(null);
+  /** The folder whose icon picker is open. */
+  let picking = $state<string | null>(null);
 
   $effect(() => {
     try {
@@ -74,17 +78,23 @@
   <ul class="folders">
     {#each groups as g (g.cwd)}
       <li>
-        <button
-          class="folder"
-          aria-expanded={!folded[g.cwd]}
-          title={g.cwd}
-          onclick={() => (folded[g.cwd] = !folded[g.cwd])}
-        >
-          <svg class="caret" class:shut={folded[g.cwd]} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
-          <span class="fname">{g.name}</span>
-          <span class="count">{g.items.length}</span>
-        </button>
+        <div class="folder">
+          {#if g.cwd !== '(no folder)'}
+            <button class="ficon" aria-label={`Change the icon of ${g.name}`} title="Change icon" aria-expanded={picking === g.cwd} onclick={() => (picking = picking === g.cwd ? null : g.cwd)}>
+              <FolderIcon cwd={g.cwd} />
+            </button>
+          {:else}
+            <span class="ficon" aria-hidden="true"><FolderIcon cwd="" /></span>
+          {/if}
+          <button class="fold" aria-expanded={!folded[g.cwd]} title={g.cwd} onclick={() => (folded[g.cwd] = !folded[g.cwd])}>
+            <span class="fname">{g.name}</span>
+            <span class="count">{g.items.length}</span>
+            <svg class="caret" class:shut={folded[g.cwd]} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+          {#if picking === g.cwd}
+            <FolderIconPicker cwd={g.cwd} name={g.name} onclose={() => (picking = null)} />
+          {/if}
+        </div>
         {#if !folded[g.cwd]}
           <ul class="convs">
             {#each g.items as c (c.id)}
@@ -143,22 +153,28 @@
   .title { font-weight: 650; font-size: 13px; }
   .empty { color: var(--muted); font-size: 12px; padding: 4px 6px; margin: 0; line-height: 1.5; }
   ul { list-style: none; margin: 0; padding: 0; }
-  .folder {
+  .folder { position: relative; display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+  .folder:hover { background: var(--surface); }
+  .ficon {
+    display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0;
+    border: 0; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer;
+  }
+  .ficon:hover, .ficon[aria-expanded='true'] { background: var(--surface-2); }
+  .fold {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 100%;
     border: 0;
     background: transparent;
     padding: 6px;
     min-height: 32px;
-    border-radius: 8px;
     cursor: pointer;
     font-weight: 600;
     font-size: 13px;
     text-align: left;
   }
-  .folder:hover { background: var(--surface); }
   .caret { transition: transform 0.15s; flex-shrink: 0; }
   .caret.shut { transform: rotate(-90deg); }
   .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

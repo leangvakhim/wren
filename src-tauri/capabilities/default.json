@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main view only (not the browser panel): core APIs, the native folder picker, in-app updates, system notifications, and Wren's own commands.",
+  "description": "Main view only (not the browser panel): core APIs, the native folder picker, in-app updates, system notifications, and Wren's own commands (including the phone link).",
   "webviews": [
     "main"
   ],
@@ -49,6 +49,7 @@
     "allow-close-pane",
     "allow-detect-clis",
     "allow-default-folder",
+    "allow-folder-kind",
     "allow-data-folder",
     "allow-list-accounts",
     "allow-add-account",
@@ -67,6 +68,15 @@
     "allow-check-github",
     "allow-remove-github",
     "allow-start-github-login",
-    "allow-reset-wren"
+    "allow-reset-wren",
+    "allow-remote-attach",
+    "allow-remote-configure",
+    "allow-remote-pair",
+    "allow-remote-cancel-pair",
+    "allow-remote-confirm",
+    "allow-remote-remove-device",
+    "allow-remote-rename-device",
+    "allow-remote-send",
+    "allow-remote-push"
   ]
 }

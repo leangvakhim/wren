@@ -1183,6 +1183,56 @@ mod tests {
         m.kill_all();
     }
 
+    /// The real Claude Code against a fake API (WREN_FAKE_API5=<url>) that answers
+    /// "BG please" with a background `sleep 4` Bash call, then text, then
+    /// "Background job finished: noticed." for the task notification. The pane
+    /// must see the first turn end and Claude start again by itself.
+    #[test]
+    fn real_claude_background_followup() {
+        let Ok(api) = std::env::var("WREN_FAKE_API5") else { return };
+        let dir = std::env::temp_dir().join(format!("wren-real-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ev2 = events.clone();
+        let channel: Channel<UiEvent> = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(s) = body {
+                ev2.lock().unwrap().push(s);
+            }
+            Ok(())
+        });
+        let m = Manager::default();
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Full,
+            account_id: None,
+            model: Some("haiku".into()),
+            effort: None,
+            mode: None,
+            github_account_id: None,
+            ai_browser: false,
+            codex_private: false,
+        };
+        let env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), api),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
+        ];
+        tauri::async_runtime::block_on(async {
+            m.open("bg".into(), cfg, Ok(env), channel).unwrap();
+            m.send("bg", "BG please".into(), vec![]).unwrap();
+            wait_for(&events, "turn_done", 2);
+        });
+        let e = events.lock().unwrap();
+        let kinds: Vec<&str> = e.iter().filter_map(|s| s.split("\"kind\":\"").nth(1)).map(|r| r.split('"').next().unwrap()).collect();
+        let order: Vec<&str> = kinds.iter().copied().filter(|k| matches!(*k, "turn_started" | "turn_done")).collect();
+        assert_eq!(order, ["turn_started", "turn_done", "turn_started", "turn_done"], "{kinds:?}");
+        let second = e.iter().position(|s| s.contains("turn_started")).unwrap();
+        let later = e.iter().skip(second + 1).position(|s| s.contains("turn_started")).unwrap() + second + 1;
+        assert!(e[later..].iter().any(|s| s.contains("Background job finished")), "{e:?}");
+        m.kill_all();
+    }
+
     #[test]
     fn fake_clis_end_to_end() {
         let dir = std::env::temp_dir().join(format!("wren-test-{}", std::process::id()));

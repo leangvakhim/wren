@@ -89,6 +89,8 @@ export interface AccountLimits extends PlanLimits {
   error: string | null;
   /** Where the numbers came from: a reply in a pane ('reply') or a read from the CLI ('read'). */
   from?: 'reply' | 'read';
+  /** ms, when the latest read failed. */
+  failedAt?: number;
 }
 
 export interface ModelInfo {
@@ -199,6 +201,7 @@ export type UiEvent =
   | { kind: 'text_end'; full: string | null }
   | { kind: 'tool_use'; name: string; summary: string }
   | { kind: 'tool_result'; output: string; is_error: boolean }
+  | { kind: 'turn_started' }
   | { kind: 'turn_done'; usage: Usage; cost_usd: number | null; error: string | null }
   | { kind: 'error'; message: string }
   | { kind: 'log'; line: string }

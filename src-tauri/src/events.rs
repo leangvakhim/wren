@@ -127,6 +127,9 @@ pub enum UiEvent {
     ToolUse { name: String, summary: String },
     /// Output of a tool call (truncated).
     ToolResult { output: String, is_error: bool },
+    /// The CLI started working without a message from Wren (Claude Code
+    /// after a background command or sub-agent finished).
+    TurnStarted,
     /// A turn finished. `cost_usd` is only filled when the CLI reports it
     /// (Claude Code); it is an API-price estimate on subscription plans.
     TurnDone {

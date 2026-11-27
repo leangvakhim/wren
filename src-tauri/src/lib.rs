@@ -2,6 +2,7 @@ mod accounts;
 mod attachments;
 mod browser;
 mod events;
+mod folders;
 mod github;
 mod handoff;
 mod history;
@@ -10,6 +11,7 @@ mod link;
 mod login;
 mod models;
 mod providers;
+mod remote;
 mod reports;
 mod sessions;
 
@@ -179,6 +181,12 @@ fn open_external(url: String) -> Result<(), String> {
 #[tauri::command]
 async fn visual_url(visuals: State<'_, browser::Visuals>, cwd: String, path: String) -> Result<String, String> {
     visuals.url_for(&cwd, &path).await
+}
+
+/// A suggested icon for a project folder (from its file names), or None.
+#[tauri::command]
+fn folder_kind(path: String) -> Option<&'static str> {
+    folders::detect(std::path::Path::new(&path))
 }
 
 /// Pages in <cwd>/visuals changed since `since` (ms), newest first.
@@ -483,6 +491,7 @@ fn start_github_login(
 async fn reset_wren(app: tauri::AppHandle) -> Result<(), String> {
     app.state::<Manager>().kill_all();
     app.state::<LoginManager>().cancel_all();
+    app.state::<remote::Remote>().stop();
     let sign_outs: Vec<(Provider, Vec<(String, String)>)> = {
         let store = app.state::<AccountStore>();
         store
@@ -596,6 +605,54 @@ fn cancel_login(logins: State<'_, LoginManager>, login_id: String) {
     logins.cancel(&login_id)
 }
 
+// ---------------- phone link ----------------
+
+#[tauri::command]
+fn remote_attach(remote: State<'_, remote::Remote>, on_event: Channel<remote::RemoteEvent>) -> remote::RemoteView {
+    remote.attach(on_event)
+}
+
+#[tauri::command]
+fn remote_configure(remote: State<'_, remote::Remote>, enabled: bool, relay: String, access_key: Option<String>, keep_awake: bool) -> Result<remote::RemoteView, String> {
+    remote.configure(enabled, relay, access_key, keep_awake)
+}
+
+#[tauri::command]
+fn remote_pair(remote: State<'_, remote::Remote>) -> Result<remote::PairCode, String> {
+    remote.pair()
+}
+
+#[tauri::command]
+fn remote_cancel_pair(remote: State<'_, remote::Remote>) {
+    remote.cancel_pairing()
+}
+
+#[tauri::command]
+fn remote_confirm(remote: State<'_, remote::Remote>, conn: u64, allow: bool) -> Result<(), String> {
+    remote.confirm(conn, allow)
+}
+
+#[tauri::command]
+fn remote_remove_device(remote: State<'_, remote::Remote>, id: String) {
+    remote.remove_device(&id)
+}
+
+#[tauri::command]
+fn remote_rename_device(remote: State<'_, remote::Remote>, id: String, name: String) -> Result<(), String> {
+    remote.rename_device(&id, &name)
+}
+
+/// An app message to one phone (or all connected phones when `conn` is null).
+#[tauri::command]
+fn remote_send(remote: State<'_, remote::Remote>, conn: Option<u64>, msg: serde_json::Value) -> Result<(), String> {
+    remote.send(conn, &msg)
+}
+
+#[tauri::command]
+fn remote_push(remote: State<'_, remote::Remote>, kind: String, title: String, body: String, tag: String) {
+    remote.push(&kind, &title, &body, &tag)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -614,6 +671,7 @@ pub fn run() {
             app.manage(AccountStore::load(&data));
             app.manage(GithubStore::load(&data));
             app.manage(History::load(&data));
+            app.manage(remote::Remote::new(data.clone(), Some(std::sync::Arc::new(attachments::Store::new(&data)))));
             let store = attachments::Store::new(&data);
             app.state::<Manager>().set_attach_dir(store.dir().to_string_lossy().to_string());
             app.state::<Manager>().set_browser_dir(data.join("browser-ai").to_string_lossy().to_string());
@@ -658,6 +716,7 @@ pub fn run() {
             close_pane,
             detect_clis,
             default_folder,
+            folder_kind,
             data_folder,
             list_accounts,
             add_account,
@@ -676,7 +735,16 @@ pub fn run() {
             check_github,
             remove_github,
             start_github_login,
-            reset_wren
+            reset_wren,
+            remote_attach,
+            remote_configure,
+            remote_pair,
+            remote_cancel_pair,
+            remote_confirm,
+            remote_remove_device,
+            remote_rename_device,
+            remote_send,
+            remote_push
         ])
         .build(tauri::generate_context!())
         .expect("error while building Wren");
@@ -685,6 +753,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             handle.state::<Manager>().kill_all();
             handle.state::<LoginManager>().cancel_all();
+            handle.state::<remote::Remote>().stop();
         }
     });
 }

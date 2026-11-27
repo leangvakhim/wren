@@ -1,0 +1,17 @@
+{
+  "name": "wren-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Relay between Wren and paired phones (end-to-end encrypted; stores nothing)",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.6" },
+  "scripts": {
+    "start": "node --experimental-strip-types --no-warnings src/node.ts",
+    "key": "node --experimental-strip-types --no-warnings src/key.ts",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

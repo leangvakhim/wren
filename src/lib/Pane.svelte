@@ -15,9 +15,13 @@
   import { settings } from './settings.svelte';
   import { firstLine, notify, type NotifyKind } from './notify.svelte';
   import { buildRecap, formatWait, isLimitMessage, isRecapBubble, parseResetTime } from './limits';
+  import FolderIcon from './FolderIcon.svelte';
   import { CHECK_ICON, COPY_ICON, copyText, renderMarkdown } from './markdown';
   import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
   import { findGithub, github, githubLabel } from './github.svelte';
+  import { paneChanged, pushToPhones, registerPane, remote, unregisterPane, type PaneRemote } from './remote.svelte';
+  import type { PhonePaneMeta } from './remoteTypes';
+  import { BIRD_WORDS, cardLabel, fmtDuration, groupTurns, stepLabel, type Item as ChatItem } from './chatView';
   import { MODES, PROVIDERS, PERMISSIONS, normalizePermission, type Attachment, type SentFile, type Conversation, type Msg, type PaneConfig, type Provider, type Totals, type UiEvent, type UsageRecord } from './types';
 
   let {
@@ -303,6 +307,25 @@
     return '';
   }
 
+  /** Stop was pressed: late lines from the stopped CLI don't make the pane work again. */
+  let stopped = false;
+
+  /** The CLI works again although Wren thought the task was over (Claude after a background command or sub-agent finished): show it as working. */
+  function resumeWorking() {
+    if (busy || stopped) return;
+    const u = [...messages].reverse().find((m) => m.role === 'user');
+    if (!u) return;
+    busy = true;
+    thinking = false;
+    refusedThisTurn = false;
+    // The timer goes on from the time already worked; the steps open again.
+    turnStartedAt = tickNow = Date.now() - (u.durationMs ?? 0);
+    u.durationMs = undefined;
+    delete openTurns[u.id];
+    clearInterval(tickTimer);
+    tickTimer = setInterval(() => (tickNow = Date.now()), 1000);
+  }
+
   /** The turn ended (answered, failed, stopped): stop the timer and remember how long it worked. */
   function endTurn() {
     clearInterval(tickTimer);
@@ -318,75 +341,9 @@
   /** Steps open/closed by the user, per turn (the user message id). */
   let openTurns = $state<Record<number, boolean>>({});
 
-  type Item =
-    | { kind: 'msg'; m: Msg }
-    | { kind: 'group'; key: number; steps: Msg[]; live: boolean; durationMs: number | undefined };
+  type Item = ChatItem<Msg>;
 
-  /**
-   * Each turn = the user's message, one group with the work (tool calls and the
-   * AI's notes between them), then everything else in order (the answer,
-   * approval cards, errors, notes).
-   */
-  const items = $derived.by(() => {
-    const out: Item[] = [];
-    const segs: { user: Msg | null; rest: Msg[] }[] = [{ user: null, rest: [] }];
-    for (const m of messages) {
-      if (m.role === 'user') segs.push({ user: m, rest: [] });
-      else segs[segs.length - 1].rest.push(m);
-    }
-    segs.forEach((seg, i) => {
-      const last = i === segs.length - 1;
-      if (seg.user) out.push({ kind: 'msg', m: seg.user });
-      // An AI message is a step if more tool work follows it in this turn.
-      const lastTool = seg.rest.map((m) => m.role).lastIndexOf('tool');
-      // Answered approval cards and question forms move into the steps too, so the chat stays clean.
-      const steps = seg.user
-        ? seg.rest.filter((m, j) => m.role === 'tool' || (m.role === 'assistant' && j < lastTool) || settledCard(m) || (m.role === 'info' && m.step))
-        : [];
-      const live = last && busy && !!seg.user;
-      if (seg.user && (steps.length || live)) {
-        out.push({ kind: 'group', key: seg.user.id, steps, live, durationMs: seg.user.durationMs });
-      }
-      for (const m of seg.rest) if (!steps.includes(m) && m.role !== 'details') out.push({ kind: 'msg', m });
-    });
-    return out;
-  });
-
-  /** An approval card or question form that needs nothing more from you. */
-  function settledCard(m: Msg): boolean {
-    if (m.role === 'approval') return m.approvalState !== 'waiting' && m.approvalState !== 'refused';
-    if (m.role === 'question') return m.questionState !== 'waiting';
-    return false;
-  }
-
-  /** One-line label for an answered card in the steps. */
-  function cardLabel(m: Msg): { label: string; subject: string; bad: boolean } {
-    if (m.role === 'question') {
-      const n = m.questions?.length ?? 0;
-      const subject = (m.questions ?? []).map((q) => q.header || q.question).join(' · ');
-      const label =
-        m.questionState === 'answered' ? `Answered ${n === 1 ? 'a question' : `${n} questions`}` : m.questionState === 'skipped' ? 'Skipped questions' : 'Questions not answered';
-      return { label, subject, bad: false };
-    }
-    const plan = m.tool === 'ExitPlanMode';
-    const subject = plan ? 'Plan' : `${m.tool}: ${m.text.split('\n')[0]}`;
-    switch (m.approvalState) {
-      case 'allowed':
-        return { label: plan ? 'Started the plan' : 'Allowed', subject, bad: false };
-      case 'allowed_session':
-        return { label: 'Allowed for this chat', subject, bad: false };
-      case 'auto_allowed':
-        return { label: `Allowed by ${m.autoBy ?? 'the new permission'}`, subject, bad: false };
-      case 'denied':
-        return { label: plan ? 'Kept planning' : 'Denied', subject, bad: true };
-      case 'retried':
-        return { label: 'Retried with Auto', subject, bad: false };
-      case 'kept':
-        return { label: 'Kept refused', subject, bad: true };
-      default:
-        return { label: 'Not answered', subject, bad: false };
-    }
-  }
+  const items = $derived(groupTurns(messages, busy));
 
   /** The latest turn (from the last message you sent) is shown on its own, at least one screen tall, so it can sit at the top like in Claude Desktop. */
   const itemKey = (it: Item) => (it.kind === 'group' ? `g${it.key}` : it.m.id);
@@ -472,7 +429,19 @@
     }, 2000);
   }
 
-  const BIRD_WORDS = ['Pecking', 'Foraging', 'Figuring', 'Nesting', 'Preening', 'Scouting', 'Hopping', 'Fluttering', 'Gathering twigs'];
+  /** The copy button under an answer copies its Markdown text. */
+  let copiedAnswer = $state<number | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyAnswer(m: Msg) {
+    if (!(await copyText(m.text.trim()))) {
+      push({ role: 'error', text: "Couldn't copy the response." });
+      return;
+    }
+    copiedAnswer = m.id;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedAnswer = null), 2000);
+  }
+
   const verb = $derived.by(() => {
     if (waitingQuestion) return 'Waiting for your answer';
     if (waitingApproval) return 'Waiting for your approval';
@@ -480,31 +449,6 @@
     const sec = Math.floor((tickNow - turnStartedAt) / 1000);
     return BIRD_WORDS[Math.floor(sec / 3) % BIRD_WORDS.length];
   });
-
-  /** "Ran a command", "Read a file", … for a tool call. */
-  function stepLabel(m: Msg): { label: string; subject: string } {
-    const name = m.text;
-    const d = m.detail ?? '';
-    const file = d.split(/[\\/]/).filter(Boolean).pop() ?? d;
-    const n = name.toLowerCase();
-    if (['bash', 'shell', 'run_command', 'powershell', 'exec_command'].includes(n)) return { label: 'Ran a command', subject: '' };
-    if (['read', 'view_file', 'read_file', 'notebookread'].includes(n)) return { label: 'Read a file', subject: file };
-    if (['write', 'write_to_file', 'create_file'].includes(n)) return { label: 'Wrote a file', subject: file };
-    if (['edit', 'multiedit', 'notebookedit', 'replace_file_content', 'replace', 'apply_patch'].includes(n))
-      return { label: n === 'edit' && d.includes(',') ? 'Edited files' : 'Edited a file', subject: n === 'edit' && d.includes(',') ? '' : file };
-    if (['grep', 'glob', 'grep_search', 'find_by_name', 'list_dir', 'ls'].includes(n)) return { label: 'Searched files', subject: d };
-    if (['websearch', 'web_search', 'search_web'].includes(n)) return { label: 'Searched the web', subject: d };
-    if (['webfetch', 'read_url_content', 'fetch'].includes(n)) return { label: 'Read a web page', subject: d };
-    if (['agent', 'task'].includes(n)) return { label: 'Ran a sub-agent', subject: d };
-    if (['todowrite', 'taskcreate', 'taskupdate'].includes(n)) return { label: 'Updated tasks', subject: '' };
-    return { label: `Used ${name}`, subject: d };
-  }
-
-  function fmtDuration(ms: number | undefined): string {
-    if (ms === undefined) return '';
-    const s = Math.max(1, Math.round(ms / 1000));
-    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-  }
 
   /** Approval cards still waiting for the user. */
   const waitingApproval = $derived(messages.some((m) => (m.role === 'approval' && m.approvalState === 'waiting') || (m.role === 'question' && m.questionState === 'waiting')));
@@ -668,7 +612,8 @@
   $effect(() => {
     const id = config.accountId;
     const p = config.provider;
-    if (opened && installed[p] && accountOk) refreshLimits(id, p, 300_000);
+    // untrack: the read changes the limits store, which must not run this again.
+    if (opened && installed[p] && accountOk) untrack(() => refreshLimits(id, p, 300_000));
   });
 
   const modelList = $derived(modelLists[modelsKey(config.provider, config.accountId)]);
@@ -879,7 +824,9 @@
 
   /** System notification (only while Wren is in the back); coming back makes this pane active. */
   function tell(kind: NotifyKind, what: string, body: string) {
-    notify(paneId, kind, `${providerLabel} ${what}${folderName ? ` · ${folderName}` : ''}`, body, onactivate);
+    const title = `${providerLabel} ${what}${folderName ? ` · ${folderName}` : ''}`;
+    notify(paneId, kind, title, body, onactivate);
+    pushToPhones(kind, title, body, slot);
   }
 
   /** Wait until the reset time, then re-send the last message on the same account. */
@@ -922,6 +869,10 @@
   }
 
   function handle(ev: UiEvent) {
+    // Work arriving after the end of a task means the CLI went on by itself.
+    if (ev.kind === 'turn_started' || ev.kind === 'text_delta' || ev.kind === 'tool_use' || ev.kind === 'thinking' || ev.kind === 'approval' || ev.kind === 'question') {
+      resumeWorking();
+    }
     switch (ev.kind) {
       case 'plan_limits':
         sawLimitEvent = true;
@@ -1120,6 +1071,12 @@
       defaultPath: config.cwd || defaultFolder || undefined,
     });
     if (typeof dir !== 'string' || dir === config.cwd) return;
+    // An error is shown in the chat.
+    await setFolder(dir).catch(() => {});
+  }
+
+  /** Another project folder (folder chip, or a paired phone). */
+  async function setFolder(dir: string) {
     const from = config.cwd;
     config.cwd = dir;
     if (!opened || !convId || !messages.some((m) => m.role === 'user')) {
@@ -1132,7 +1089,7 @@
     } catch (e) {
       config.cwd = from;
       push({ role: 'error', text: String(e) });
-      return;
+      throw e;
     }
     folderMoved = { from: folderMoved?.from ?? from, to: dir };
     if (folderMoved.from === dir) folderMoved = null;
@@ -1211,6 +1168,7 @@
   async function stop() {
     try {
       await invoke('stop_pane', { paneId });
+      stopped = true;
       permissionChangedLive = false;
       busy = false;
       streamingId = null;
@@ -1328,6 +1286,14 @@
       push({ role: 'error', text: 'Choose a project folder for this pane first.' });
       return;
     }
+    input = '';
+    const files: SentFile[] = attachments.map(({ preview: _p, ...f }) => f);
+    attachments = [];
+    await submit(text, files);
+  }
+
+  /** A message from the message box or from a paired phone. */
+  async function submit(text: string, files: SentFile[]) {
     // The pane got an account since its CLI started (e.g. the first one was just added).
     if (opened && config.accountId !== appliedAccount) {
       try {
@@ -1339,9 +1305,6 @@
         markApplied();
       } catch {}
     }
-    input = '';
-    const files: SentFile[] = attachments.map(({ preview: _p, ...f }) => f);
-    attachments = [];
     stopWaiting();
     limitHit = false;
     if (recapFrom) {
@@ -1369,6 +1332,7 @@
     turnSentAt = Date.now();
     persist();
     busy = true;
+    stopped = false;
     thinking = false;
     refusedThisTurn = false;
     lastToolSummary = '';
@@ -1419,17 +1383,178 @@
     else if (/\.(html?|svg)([?#].*)?$/i.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href)) openVisual(decodeURIComponent(href.replace(/^file:\/\//, '').replace(/[?#].*$/, '')));
   }
 
+
+  // ---- paired phones (src/lib/remote.svelte.ts) ----
+
+  /** Wren's slot for this pane (pane-1 = 0). */
+  const slot = untrack(() => Number(paneId.replace(/\D/g, '')) - 1);
+  let markOpened: () => void = () => {};
+  const openedReady = new Promise<void>((r) => (markOpened = r));
+
+  function phoneMeta(): Omit<PhonePaneMeta, 'pos'> {
+    const modelLabel = config.model ? modelName(modelList, config.model) : reportedModel ? modelName(modelList, reportedModel) : (defaultModel?.label ?? '');
+    const problem = missing
+      ? `The ${PROVIDERS[config.provider].bin} CLI isn't installed on the computer.`
+      : !account
+        ? `There's no ${providerLabel} account in Wren yet. Add one on the computer.`
+        : !accountOk
+          ? config.provider === 'antigravity'
+            ? `"${account.name}" isn't the active Antigravity account.`
+            : `"${account.name}" isn't signed in. Sign in on the computer.`
+          : null;
+    return {
+      slot,
+      provider: config.provider,
+      accountId: config.accountId,
+      accountName: account?.name ?? '',
+      permission: config.permission,
+      mode: config.mode ?? null,
+      model: config.model ?? '',
+      effort: config.effort ?? '',
+      modelLabel,
+      cwd: config.cwd,
+      title: convId ? convTitle : '',
+      convId,
+      busy,
+      startedAt: turnStartedAt,
+      thinking,
+      waitingFor: waitingQuestion ? 'question' : waitingApproval ? 'approval' : null,
+      waitingLimit: waiting ? { ...waiting } : null,
+      limitHit,
+      problem,
+      totals: { input: totals.input, output: totals.output, cost: totals.cost, hasCost: totals.hasCost },
+    };
+  }
+
+  const cardById = (id: number) => {
+    const m = messages.find((x) => x.id === id);
+    if (!m) throw new Error('That card is gone (the chat changed).');
+    return m;
+  };
+
+  const phoneApi: PaneRemote = {
+    slot,
+    meta: phoneMeta,
+    messages: () => messages,
+    isEmpty: () => !busy && !waiting && !messages.some((m) => m.role === 'user'),
+    opened: () => openedReady,
+    async send(text, files) {
+      if (busy) throw new Error('This pane is still working. Wait, or press Stop.');
+      if (missing) throw new Error(`The ${PROVIDERS[config.provider].bin} CLI isn't installed on the computer.`);
+      if (text === '\\new') return newConversation();
+      if (!text && !files.length) throw new Error('Type a message first.');
+      if (!config.cwd) throw new Error('Choose a project folder for this pane first.');
+      await submit(text, files);
+    },
+    stop: () => stop(),
+    async approve(id, decision) {
+      const m = cardById(id);
+      if (decision === 'retry') {
+        if (m.approvalState !== 'refused') throw new Error('Nothing to retry.');
+        return allowAndRetry(m);
+      }
+      if (decision === 'keep') {
+        if (m.approvalState === 'refused') {
+          m.approvalState = 'kept';
+          persist();
+        }
+        return;
+      }
+      if (m.approvalState !== 'waiting') throw new Error('That request was already answered.');
+      await answerApproval(m, decision);
+    },
+    async answer(id, answers) {
+      const m = cardById(id);
+      if (m.questionState !== 'waiting') throw new Error('Those questions were already answered.');
+      await answerQuestion(m, answers);
+    },
+    newChat: () => newConversation(),
+    async config(patch) {
+      const changesAI = (patch.provider !== undefined && patch.provider !== config.provider) || (patch.accountId !== undefined && patch.accountId !== config.accountId);
+      if ((changesAI || (patch.mode !== undefined && patch.mode !== (config.mode ?? null)) || (patch.cwd !== undefined && patch.cwd !== config.cwd)) && busy) {
+        throw new Error('Wait until the pane finishes (or press Stop) to change this.');
+      }
+      if (changesAI) {
+        if (patch.provider !== undefined && patch.provider !== config.provider) {
+          config.provider = patch.provider;
+          config.accountId = patch.accountId ?? bestAccountId(patch.provider);
+          config.model = '';
+          config.effort = '';
+        } else if (patch.accountId !== undefined) {
+          config.accountId = patch.accountId;
+        }
+        await continueWith('switch');
+      }
+      if (patch.permission !== undefined && normalizePermission(patch.permission) !== config.permission) {
+        config.permission = normalizePermission(patch.permission);
+        await changePermission();
+      }
+      if ((patch.model !== undefined && patch.model !== (config.model ?? '')) || (patch.effort !== undefined && patch.effort !== (config.effort ?? ''))) {
+        if (patch.model !== undefined) config.model = patch.model;
+        if (patch.effort !== undefined) config.effort = patch.effort;
+        await changeModel();
+      }
+      if (patch.mode !== undefined && patch.mode !== (config.mode ?? null)) {
+        config.mode = patch.mode;
+        await changeMode();
+      }
+      if (patch.cwd !== undefined && patch.cwd.trim() && patch.cwd !== config.cwd) await setFolder(patch.cwd.trim());
+    },
+    async limit(action, accountId) {
+      if (action === 'continue') return continueNow();
+      if (action === 'cancel') return stopWaiting();
+      if (action === 'dismiss') {
+        limitHit = false;
+        return;
+      }
+      if (!accountId || !otherAccounts.some((a) => a.id === accountId)) throw new Error('Pick another signed-in account.');
+      switchTo = accountId;
+      switchAccount();
+    },
+    openConversation: (id) => openConversation(id),
+    async prepare(cfg) {
+      if (busy) throw new Error('This pane is busy.');
+      config.provider = cfg.provider;
+      config.accountId = cfg.accountId || bestAccountId(cfg.provider);
+      config.permission = normalizePermission(cfg.permission);
+      config.model = cfg.model ?? '';
+      config.effort = cfg.effort ?? '';
+      config.mode = cfg.mode ?? null;
+      if (cfg.cwd?.trim()) config.cwd = cfg.cwd.trim();
+      if (!opened) throw new Error('The pane could not start.');
+      await invoke('update_pane', { paneId, config: $state.snapshot(config) });
+      markApplied();
+      resetView();
+      push({ role: 'info', text: 'New task from your phone.' });
+    },
+    async close() {
+      if (busy) await stop();
+      close();
+    },
+  };
+
+  // While a phone is connected, tell it when this pane changes (cheap otherwise: nothing is read).
+  $effect(() => {
+    if (!remote.phones) return;
+    void JSON.stringify(phoneMeta());
+    void JSON.stringify(messages);
+    untrack(() => paneChanged(slot));
+  });
+
   const fmt = (n: number) => (n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
 
   onMount(async () => {
+    registerPane(phoneApi);
     const channel = new Channel<UiEvent>();
     channel.onmessage = handle;
     try {
       await invoke('open_pane', { paneId, config: $state.snapshot(config), onEvent: channel });
       markApplied();
       opened = true;
+      markOpened();
       nowTimer = setInterval(() => (now = Date.now()), 60_000);
     } catch (e) {
+      markOpened();
       push({ role: 'error', text: String(e) });
     }
   });
@@ -1437,6 +1562,7 @@
   let nowTimer: ReturnType<typeof setInterval> | undefined;
 
   onDestroy(() => {
+    unregisterPane(slot);
     clearInterval(nowTimer);
     clearInterval(tickTimer);
     stopWaiting();
@@ -1691,6 +1817,14 @@
           {/if}
         {:else if m.role === 'assistant'}
           <div class="msg assistant md">{@html renderMarkdown(m.text)}</div>
+          {#if m.text.trim() && !(busy && m.id === streamingId)}
+            <div class="answeractions">
+              <button class="anscopy" class:copied={copiedAnswer === m.id} onclick={() => copyAnswer(m)} aria-label="Copy response" title="Copy response (Markdown)">
+                {@html copiedAnswer === m.id ? CHECK_ICON : COPY_ICON}
+                {#if copiedAnswer === m.id}<span>Copied</span>{/if}
+              </button>
+            </div>
+          {/if}
         {:else if m.role === 'error'}
           <div class="msg error" role="alert">{m.text}</div>
         {:else if m.role === 'approval'}
@@ -1812,7 +1946,7 @@
       <div class="tools">
         <ModeMenu bind:mode={config.mode} bind:aiBrowser={config.aiBrowser} provider={config.provider} disabled={busy || missing} onchange={changeMode} onaddfiles={pickFiles} onbrowser={changeAiBrowser} />
         <button class="chip" onclick={pickFolder} disabled={busy} title={config.cwd ? `Project folder: ${config.cwd}` : 'Choose a project folder'}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+          <FolderIcon cwd={config.cwd} />
           <span>{folderName || 'Choose folder'}</span>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
         </button>
@@ -1944,6 +2078,14 @@
   .user.fade { mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent); -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent); }
   .more { align-self: flex-end; margin-top: -4px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; padding: 2px 4px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .more:hover { color: var(--text); }
+  .answeractions { display: flex; margin-top: -6px; }
+  .anscopy {
+    display: inline-flex; align-items: center; gap: 4px;
+    min-width: 28px; min-height: 28px; padding: 0 6px; justify-content: center;
+    border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .anscopy:hover, .anscopy:focus-visible { color: var(--text); background: var(--surface); }
+  .anscopy.copied { color: var(--ok); }
   .md :global(.codeblock) { position: relative; }
   .md :global(.codeblock pre) { padding-right: 44px; }
   .md :global(.copybtn) {

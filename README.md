@@ -207,6 +207,22 @@ Copies of 0.1.0 have no updater: install 0.1.1 by hand once.
   100 MB each and 10 per message. Programs and installers are refused. Wren keeps a
   private copy in its own data folder and tells the AI where it is (images and PDFs
   go straight into the message where the AI supports it).
+- **Phone** (top bar): use Wren from your phone, from anywhere. See your panes
+  live, tap **Allow / Deny** on approvals, answer question forms, send messages
+  (with photos or files), press Stop, start a new task (AI, account, model,
+  permission, folder) and open saved chats. Push notifications reach the phone
+  when a pane needs you or finishes.
+  - It needs a small relay on a server of yours (`relay/`, see
+    [relay/README.md](relay/README.md)) and its access key. Everything between
+    Wren and the phone is end-to-end encrypted; the relay can't read it.
+  - **Show pairing code**, scan it with the phone's camera, tap **Pair**, then
+    **Allow** the phone in Wren. Each phone can be renamed or removed later.
+  - iPhone: for notifications, add the page to the Home Screen first
+    (Share → Add to Home Screen), open it from there, and pair it with
+    **Copy link** in Wren (an iPhone keeps Home Screen apps apart from Safari).
+  - A paired phone can do everything you can do in Wren, including Full access.
+    Keep Wren open; Wren keeps the computer awake while the phone link is on
+    (a closed laptop lid still makes it sleep).
 - Type `\new` (or press **New**) to start a fresh conversation in that pane.
 - **Stop** ends the current task. Your next message continues the conversation.
 - **Light / Dark / System** sets the appearance.
@@ -215,6 +231,9 @@ Copies of 0.1.0 have no updater: install 0.1.1 by hand once.
 
 - Wren has no server. Its settings and conversation history stay in its app
   data folder on your computer (shown in the Privacy window).
+- The phone link (off by default) goes through a relay **you** run. Messages
+  are end-to-end encrypted between Wren and your phone; the relay only passes
+  them along. Push notifications are encrypted for your phone's browser too.
 - Claude Code panes run with telemetry, error reporting and surveys turned off
   (`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and related settings).
 - Codex runs with `analytics.enabled=false` and `feedback.enabled=false`.
@@ -247,7 +266,11 @@ src-tauri/src/
   models.rs          model + effort lists per AI (with tests)
   history.rs         local conversation history (with tests)
   events.rs          the one event format the UI understands
+  remote/            phone link: relay connection, pairing, end-to-end encryption,
+                     Web Push, keep-awake (with tests; src/lib/remote.svelte.ts is the UI side)
   lib.rs             Tauri commands
+phone/               the phone page (Svelte), built into relay/public with `npm run build:phone`
+relay/               the relay (Node; stores nothing, sees only encrypted messages)
 app-icon.svg         the "Perch" logo; regenerate icons with `npx tauri icon app-icon.png`
 ```
 

@@ -1,6 +1,6 @@
 {
   "name": "wren",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "Wren: a lightweight desktop GUI for Claude Code, Codex and Antigravity CLI",
   "type": "module",
   "scripts": {
@@ -10,7 +10,10 @@
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:phone": "vite build --config phone/vite.config.ts",
+    "dev:phone": "vite --config phone/vite.config.ts",
+    "check:phone": "svelte-check --tsconfig ./phone/tsconfig.json"
   },
   "license": "MIT",
   "dependencies": {

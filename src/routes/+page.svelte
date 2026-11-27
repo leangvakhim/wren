@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Logo from '$lib/Logo.svelte';
   import Pane from '$lib/Pane.svelte';
   import AccountsDialog from '$lib/AccountsDialog.svelte';
@@ -8,8 +8,10 @@
   import SettingsDialog from '$lib/SettingsDialog.svelte';
   import UsageDialog from '$lib/UsageDialog.svelte';
   import Sidebar from '$lib/Sidebar.svelte';
-  import { loadHistory } from '$lib/history.svelte';
-  import { accounts, bestAccountId, checkAll, loadAccounts } from '$lib/accounts.svelte';
+  import PhoneDialog from '$lib/PhoneDialog.svelte';
+  import { history, loadHistory } from '$lib/history.svelte';
+  import { accounts, bestAccountId, checkAll, isUsable, loadAccounts } from '$lib/accounts.svelte';
+  import { answerPhone, remote, scheduleApp, startRemote } from '$lib/remote.svelte';
   import { checkAllGithub, loadGithub } from '$lib/github.svelte';
   import { applyTheme, type Theme } from '$lib/theme';
   import { installUpdate, snoozeUpdate, startUpdateChecks, updater, whatsNew } from '$lib/updater.svelte';
@@ -58,6 +60,7 @@
   let showPrivacy = $state(false);
   let showSettings = $state(false);
   let showUsage = $state(false);
+  let showPhone = $state(false);
   let sidebar = $state(saved.sidebar);
   // Pane components by slot (to open a saved conversation in the active one).
   let panes = $state<(Pane | undefined)[]>([]);
@@ -115,6 +118,50 @@
     checkAll(installed);
     checkAllGithub();
     startUpdateChecks();
+    startRemote({
+      app: () => ({
+        accounts: accounts.list.map((a) => ({ id: a.id, provider: a.provider, name: a.name, usable: isUsable(a) })),
+        installed: { claude: !!installed.claude, codex: !!installed.codex, antigravity: !!installed.antigravity },
+        folders: [...new Set([...visible.map((s) => configs[s].cwd), ...history.list.map((h) => h.cwd), defaultFolder].filter(Boolean))].slice(0, 20),
+        defaultFolder,
+        history: $state.snapshot(history.list).slice(0, 100),
+      }),
+      position: (slot) => {
+        const pos = visible.indexOf(slot);
+        return pos;
+      },
+      visible: () => [...visible],
+      addPane: async () => {
+        if (layout >= 4) throw new Error('All 4 panes are in use on the computer. Close one first.');
+        const slot = order[layout];
+        configs[slot] = { ...DEFAULT_CONFIG, cwd: defaultFolder, accountId: bestAccountId(DEFAULT_CONFIG.provider) };
+        paneConv[slot] = null;
+        layout += 1;
+        activePane = layout - 1;
+        await tick();
+        return slot;
+      },
+    });
+  });
+
+  // The phone's home screen follows accounts, saved chats and the layout.
+  $effect(() => {
+    if (!remote.phones) return;
+    void JSON.stringify(accounts.list);
+    void history.list.length;
+    void history.list[0]?.updatedAt;
+    void visible.length;
+    void JSON.stringify(installed);
+    scheduleApp();
+  });
+
+  // ---- a new phone asks to pair ----
+  let askDlg: HTMLDialogElement | undefined = $state();
+  const ask = $derived(remote.asks[0]);
+  $effect(() => {
+    if (!askDlg) return;
+    if (ask && !askDlg.open) askDlg.showModal();
+    if (!ask && askDlg.open) askDlg.close();
   });
 
   // ---- in-app update ----
@@ -185,6 +232,12 @@
       Privacy
     </button>
 
+    <button class="ghost" onclick={() => (showPhone = true)} title={remote.phones ? `${remote.phones} phone${remote.phones > 1 ? 's' : ''} connected` : 'Use Wren from your phone'}>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5" /><path d="M11 18h2" /></svg>
+      Phone
+      {#if remote.phones}<span class="live" aria-label={`${remote.phones} connected`}></span>{/if}
+    </button>
+
     <button class="ghost" onclick={() => (showAccounts = true)}>
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
       Accounts
@@ -238,6 +291,19 @@
 <UsageDialog bind:open={showUsage} />
 
 <AccountsDialog bind:open={showAccounts} {installed} />
+<PhoneDialog bind:open={showPhone} />
+
+<dialog class="upd" bind:this={askDlg} aria-labelledby="ask-title" oncancel={(e) => e.preventDefault()}>
+  {#if ask}
+    <h2 id="ask-title">Allow "{ask.name}" to use Wren?</h2>
+    <p>A phone just scanned your pairing code. Once allowed, it can do everything you can do here: send messages, start tasks, answer approvals, even with Full access.</p>
+    <p class="muted">Only allow it if it's your phone and you just scanned the code.</p>
+    <div class="row">
+      <button class="primary" onclick={() => answerPhone(ask.conn, true)}>Allow</button>
+      <button class="ghost" onclick={() => answerPhone(ask.conn, false)}>Don't allow</button>
+    </div>
+  {/if}
+</dialog>
 
 <dialog
   class="upd"
@@ -301,6 +367,7 @@
   .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
   .body { flex: 1; min-height: 0; display: flex; }
   .iconbtn { padding: 4px 7px; }
+  .live { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; margin-left: 2px; }
   .update {
     display: inline-flex; align-items: center; gap: 6px;
     border: 0; background: var(--accent-fill); color: #17181c;

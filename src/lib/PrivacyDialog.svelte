@@ -37,7 +37,7 @@
     <section>
       <h3>What stays on your computer</h3>
       <ul>
-        <li>Wren has no server and sends nothing to its own makers.</li>
+        <li>Wren has no server and sends nothing to its own makers. If you turn on the phone link, messages to your phone go through the relay you set up, end-to-end encrypted (the relay can't read them).</li>
         <li>Your conversations, settings, accounts list and usage numbers are saved only here:
           <code>{dataFolder || 'Wren app data folder'}</code></li>
         <li>Logins are kept by each AI's own CLI on this computer. Wren never reads them.</li>

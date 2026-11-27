@@ -39,6 +39,8 @@ export async function refreshLimits(accountId: string, provider: Provider, minAg
   const old = planLimits.byAccount[accountId];
   const fresh = !!old && Date.now() - old.checkedAt < minAgeMs;
   if (minAgeMs && fresh && (!old.error || old.windows.length)) return;
+  // A read that just failed isn't repeated right away (else a failing read retries in a loop).
+  if (minAgeMs && old?.error && Date.now() - (old.failedAt ?? 0) < Math.min(minAgeMs, 60_000)) return;
   planLimits.busy[accountId] = true;
   try {
     const l = await invoke<PlanLimits>('plan_limits', { accountId });
@@ -51,6 +53,7 @@ export async function refreshLimits(accountId: string, provider: Provider, minAg
       ...(cur ?? { windows: [], daily: null, plan: null, status: null }),
       checkedAt: cur?.checkedAt ?? Date.now(),
       error: String(e),
+      failedAt: Date.now(),
     };
   } finally {
     planLimits.busy[accountId] = false;
