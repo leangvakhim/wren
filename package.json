@@ -1,6 +1,6 @@
 {
   "name": "wren",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Wren: a lightweight desktop GUI for Claude Code, Codex and Antigravity CLI",
   "type": "module",
   "scripts": {

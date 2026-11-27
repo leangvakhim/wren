@@ -38,6 +38,7 @@
       <h3>What stays on your computer</h3>
       <ul>
         <li>Wren has no server and sends nothing to its own makers. If you turn on the phone link, messages to your phone go through the relay you set up, end-to-end encrypted (the relay can't read them).</li>
+        <li>Folder icons come with Wren. Only if you click <i>Download</i> for the extra Tabler icons does Wren fetch them once from cdn.jsdelivr.net (a plain download: no account, nothing about your work).</li>
         <li>Your conversations, settings, accounts list and usage numbers are saved only here:
           <code>{dataFolder || 'Wren app data folder'}</code></li>
         <li>Logins are kept by each AI's own CLI on this computer. Wren never reads them.</li>

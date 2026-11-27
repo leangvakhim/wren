@@ -6,6 +6,7 @@ mod folders;
 mod github;
 mod handoff;
 mod history;
+mod icons;
 mod limits;
 mod link;
 mod login;
@@ -187,6 +188,42 @@ async fn visual_url(visuals: State<'_, browser::Visuals>, cwd: String, path: Str
 #[tauri::command]
 fn folder_kind(path: String) -> Option<&'static str> {
     folders::detect(std::path::Path::new(&path))
+}
+
+/// The downloaded Tabler icons (None until you download them).
+#[tauri::command]
+async fn icon_pack(app: tauri::AppHandle) -> Result<Option<icons::Pack>, String> {
+    let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(icons::load_pack(&data))
+}
+
+/// Downloads the Tabler icons (only when you click Download).
+#[tauri::command]
+async fn icon_pack_download(app: tauri::AppHandle) -> Result<icons::Pack, String> {
+    let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    icons::download_pack(&data).await
+}
+
+#[tauri::command]
+async fn icon_pack_remove(app: tauri::AppHandle) -> Result<(), String> {
+    icons::remove_pack(&app.path().app_data_dir().map_err(|e| e.to_string())?)
+}
+
+/// Pictures you added as folder icons.
+#[tauri::command]
+async fn own_icons(app: tauri::AppHandle) -> Result<Vec<icons::OwnIcon>, String> {
+    Ok(icons::list_own(&app.path().app_data_dir().map_err(|e| e.to_string())?))
+}
+
+/// Copies a picture you chose into Wren's folder.
+#[tauri::command]
+async fn add_own_icon(app: tauri::AppHandle, path: String) -> Result<icons::OwnIcon, String> {
+    icons::add_own(&app.path().app_data_dir().map_err(|e| e.to_string())?, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+async fn remove_own_icon(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    icons::remove_own(&app.path().app_data_dir().map_err(|e| e.to_string())?, &id)
 }
 
 /// Pages in <cwd>/visuals changed since `since` (ms), newest first.
@@ -717,6 +754,12 @@ pub fn run() {
             detect_clis,
             default_folder,
             folder_kind,
+            icon_pack,
+            icon_pack_download,
+            icon_pack_remove,
+            own_icons,
+            add_own_icon,
+            remove_own_icon,
             data_folder,
             list_accounts,
             add_account,

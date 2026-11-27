@@ -5,6 +5,18 @@ for the version being released to the top of the GitHub release notes, and
 Wren shows it in the update window ("What's new"). Add a section before
 tagging a new version.
 
+## 0.2.1
+
+- **Many more folder icons**: the icon picker now has 2,148 built-in icons
+  (all of Lucide), with a search box and categories. Click the icon next to a
+  folder in the sidebar.
+- **Download 5,509 more icons** (Tabler) with one click in the picker. Wren
+  downloads them once from cdn.jsdelivr.net, checks them and keeps them on
+  this computer. Nothing is downloaded unless you click.
+- **Emoji as folder icons**: search by name, or paste any emoji.
+- **Your own pictures as icons**: add a logo or any picture (SVG, PNG, JPEG,
+  GIF or WebP, up to 1 MB). Wren keeps a copy in its own data folder.
+
 ## 0.2.0
 
 - **Phone link**: use Wren from your phone. Watch every pane live, allow or
