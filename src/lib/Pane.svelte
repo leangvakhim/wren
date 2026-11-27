@@ -13,6 +13,7 @@
   import { getConversation, saveConversation } from './history.svelte';
   import { modelLists, modelName, modelsKey } from './models.svelte';
   import { settings } from './settings.svelte';
+  import { firstLine, notify, type NotifyKind } from './notify.svelte';
   import { buildRecap, formatWait, isLimitMessage, isRecapBubble, parseResetTime } from './limits';
   import { CHECK_ICON, COPY_ICON, copyText, renderMarkdown } from './markdown';
   import { accountLabel, accountsFor, bestAccountId, findAccount, isUsable } from './accounts.svelte';
@@ -294,6 +295,14 @@
   let turnStartedAt = $state(0);
   let tickNow = $state(Date.now());
   let tickTimer: ReturnType<typeof setInterval> | undefined;
+  /** The final answer of the latest turn. */
+  function lastAnswer(): string {
+    for (let i = messages.length - 1; i >= 0 && messages[i].role !== 'user'; i--) {
+      if (messages[i].role === 'assistant' && messages[i].text.trim()) return messages[i].text;
+    }
+    return '';
+  }
+
   /** The turn ended (answered, failed, stopped): stop the timer and remember how long it worked. */
   function endTurn() {
     clearInterval(tickTimer);
@@ -514,6 +523,7 @@
     if (!REFUSAL.test(text)) return;
     refusedThisTurn = true;
     push({ role: 'approval', tool: 'Antigravity', text: lastToolSummary || 'An action that needs your permission', detail: text.slice(0, 600), approvalState: 'refused' });
+    tell('approval', 'refused an action', 'Open Wren to Allow & retry, or keep it refused.');
   }
 
   /** Approval cards and question forms the CLI can no longer receive an answer for. */
@@ -720,6 +730,11 @@
 
   /** This pane's account ran out of usage. Decide what to do by itself (task 3). */
   async function handleLimit(text: string) {
+    tell(
+      'problems',
+      'ran out of usage',
+      settings.onLimit === 'off' ? 'Open Wren to choose what to do.' : settings.onLimit === 'wait' ? 'Wren continues by itself after the reset.' : 'Wren continues in another AI by itself.',
+    );
     if (settings.onLimit === 'switch') {
       if (await switchToOtherAI()) return;
       if (settings.waitIfNoOther) return startWaiting(text);
@@ -829,6 +844,11 @@
     return true;
   }
 
+  /** System notification (only while Wren is in the back); coming back makes this pane active. */
+  function tell(kind: NotifyKind, what: string, body: string) {
+    notify(paneId, kind, `${providerLabel} ${what}${folderName ? ` · ${folderName}` : ''}`, body, onactivate);
+  }
+
   /** Wait until the reset time, then re-send the last message on the same account. */
   function startWaiting(text: string) {
     const reset = parseResetTime(text);
@@ -882,12 +902,19 @@
         streamingId = null;
         push({ role: 'approval', approvalId: ev.id, tool: ev.tool, text: ev.title, detail: ev.detail ?? undefined, approvalState: 'waiting', allowSession: ev.allow_session });
         scrollToEnd(true);
+        if (ev.tool === 'ExitPlanMode') tell('approval', 'has a plan ready', 'Start it, or keep planning.');
+        else tell('approval', 'needs your approval', ev.title);
         return;
       case 'question':
         thinking = false;
         streamingId = null;
         push({ role: 'question', approvalId: ev.id, text: '', tool: PROVIDERS[config.provider].label, questions: ev.questions, questionState: 'waiting' });
         scrollToEnd(true);
+        tell(
+          'question',
+          ev.questions.length > 1 ? `asked you ${ev.questions.length} questions` : 'asked you a question',
+          ev.questions[0]?.question ?? 'Open Wren to answer.',
+        );
         return;
       case 'notice':
         push({ role: 'notice', text: ev.text });
@@ -965,6 +992,8 @@
           saveResearchReport();
         }
         if (!ev.error) showNewVisuals();
+        if (ev.error && !pendingLimit) tell('problems', 'stopped with an error', firstLine(ev.error));
+        else if (!ev.error && !refusedThisTurn) tell('done', 'finished', firstLine(lastAnswer()) || 'The task is done.');
         // Codex doesn't report limits during a turn, so ask it (at most once a minute).
         // Claude normally sends them during the turn; ask only if it didn't.
         if (config.provider === 'codex') refreshLimits(config.accountId, 'codex', 60_000);
@@ -1004,6 +1033,7 @@
           if (ev.code !== 0 && ev.code !== null) {
             const tail = logs.slice(-8).join('\n');
             push({ role: 'error', text: `${providerLabel} stopped (exit code ${ev.code}).${tail ? '\n\n' + tail : ''}` });
+            tell('problems', 'stopped unexpectedly', `Exit code ${ev.code}.`);
           }
         }
         break;

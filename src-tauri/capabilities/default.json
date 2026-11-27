@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main view only (not the browser panel): core APIs, the native folder picker, in-app updates, and Wren's own commands.",
+  "description": "Main view only (not the browser panel): core APIs, the native folder picker, in-app updates, system notifications, and Wren's own commands.",
   "webviews": [
     "main"
   ],
@@ -11,6 +11,7 @@
     "dialog:allow-open",
     "updater:default",
     "process:allow-restart",
+    "notification:default",
     "allow-open-pane",
     "allow-update-pane",
     "allow-send-message",

@@ -599,6 +599,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(Manager::default())
         .manage(LoginManager::default())
         .manage(browser::Panels::default())

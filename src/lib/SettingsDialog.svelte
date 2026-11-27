@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { saveSettings, settings, type OnLimit } from './settings.svelte';
   import { checkForUpdate, updater } from './updater.svelte';
+  import { notifyState, testNotification } from './notify.svelte';
   import { PROVIDERS, type Provider } from './types';
 
   let { open = $bindable(false), installed }: { open: boolean; installed: Partial<Record<Provider, string | null>> } = $props();
@@ -26,6 +27,24 @@
     },
     { value: 'off', label: 'Do nothing', hint: 'Show a message and let me choose.' },
   ];
+
+  const NOTIFY_KINDS = [
+    { key: 'approval', label: 'Needs your approval', hint: 'Allow / Deny, a plan ready to start, an action Antigravity refused' },
+    { key: 'question', label: 'Asks you a question', hint: 'A question form is waiting for your choices' },
+    { key: 'done', label: 'Task done', hint: 'With the first line of the answer' },
+    { key: 'problems', label: 'Problems', hint: 'A task stopped with an error or ran out of usage' },
+  ] as const;
+
+  const SYSTEM_SETTINGS = navigator.userAgent.includes('Mac')
+    ? 'System Settings → Notifications → Wren'
+    : navigator.userAgent.includes('Windows')
+      ? 'Settings → System → Notifications → Wren'
+      : "your desktop's notification settings";
+
+  let testState = $state<'idle' | 'sent' | 'failed'>('idle');
+  async function sendTest() {
+    testState = (await testNotification()) ? 'sent' : 'failed';
+  }
 
   // ---- Reset Wren ----
   let confirmReset = $state(false);
@@ -96,6 +115,41 @@
   </section>
 
   <section>
+    <h3>Notifications</h3>
+    <label class="check first">
+      <input type="checkbox" bind:checked={settings.notify.enabled} onchange={saveSettings} />
+      <b>Allow notifications</b>
+    </label>
+    <div class="kinds" class:off={!settings.notify.enabled}>
+      {#each NOTIFY_KINDS as k}
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.notify[k.key]} disabled={!settings.notify.enabled} onchange={saveSettings} />
+          <span>{k.label} <small>· {k.hint}</small></span>
+        </label>
+      {/each}
+      <label class="check">
+        <input type="checkbox" bind:checked={settings.notify.sound} disabled={!settings.notify.enabled} onchange={saveSettings} />
+        Play a sound
+      </label>
+    </div>
+    <div class="row center gap">
+      <button class="ghost" disabled={!settings.notify.enabled} onclick={sendTest}>Send a test notification</button>
+      <span class="ver" role="status">
+        {#if testState === 'sent'}Sent. If nothing appeared, check {SYSTEM_SETTINGS}.{/if}
+      </span>
+    </div>
+    {#if notifyState.blocked}
+      <p class="err" role="alert">Notifications are blocked for Wren. To turn them back on, open {SYSTEM_SETTINGS}.</p>
+    {:else if notifyState.error}
+      <p class="err" role="alert">Couldn't show a notification: {notifyState.error}</p>
+    {/if}
+    <p class="note">
+      Shown only while Wren isn't the window in front. Coming back to Wren makes the pane that notified you the active
+      one. This setting is saved on this computer only, so everyone on your team chooses their own.
+    </p>
+  </section>
+
+  <section>
     <h3>Updates</h3>
     <div class="row center">
       <span class="ver">Wren {updater.current || '…'}</span>
@@ -160,6 +214,12 @@
   .order { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
   .order li span { display: inline-block; min-width: 230px; }
   .check { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 10px; }
+  .check.first { margin-top: 0; }
+  .check small { color: var(--muted); }
+  .kinds { padding-left: 22px; }
+  .kinds .check { margin-top: 6px; }
+  .kinds.off { opacity: 0.55; }
+  .gap { margin-top: 10px; }
   .note { color: var(--muted); font-size: 12px; margin: 12px 0 0; line-height: 1.5; }
   .note.first { margin: 0 0 8px; }
   .danger { color: var(--danger); }

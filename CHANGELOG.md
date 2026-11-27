@@ -5,6 +5,16 @@ for the version being released to the top of the GitHub release notes, and
 Wren shows it in the update window ("What's new"). Add a section before
 tagging a new version.
 
+## 0.1.9
+
+- Notifications: Wren tells you when a pane needs your approval, asks you a
+  question, finishes a task, or stops with a problem (an error or a usage
+  limit). They only appear while Wren isn't the window in front, and coming
+  back to Wren makes that pane the active one.
+- Settings → Notifications: turn them on or off, choose which kinds you want,
+  play a sound or not, and send a test notification. Each computer keeps its
+  own choice.
+
 ## 0.1.8
 
 - Wren checks for a new version a few seconds after it opens (and every 6
