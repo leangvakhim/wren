@@ -12,7 +12,8 @@
   import { accounts, bestAccountId, checkAll, loadAccounts } from '$lib/accounts.svelte';
   import { checkAllGithub, loadGithub } from '$lib/github.svelte';
   import { applyTheme, type Theme } from '$lib/theme';
-  import { installUpdate, startUpdateChecks, updater } from '$lib/updater.svelte';
+  import { installUpdate, snoozeUpdate, startUpdateChecks, updater, whatsNew } from '$lib/updater.svelte';
+  import { renderMarkdown } from '$lib/markdown';
   import { DEFAULT_CONFIG, normalizePermission, type PaneConfig, type Provider } from '$lib/types';
 
   // Everything Wren remembers lives in this computer's local app storage.
@@ -119,6 +120,11 @@
   // ---- in-app update ----
   let updDlg: HTMLDialogElement | undefined = $state();
   const updating = $derived(updater.phase === 'downloading' || updater.phase === 'installing');
+  const notes = $derived(whatsNew(updater.available?.body));
+  // A newer version was found: open the update window by itself.
+  $effect(() => {
+    if (updater.popup && updater.available && updDlg && !updDlg.open) updDlg.showModal();
+  });
 
   const THEMES: { value: Theme; label: string }[] = [
     { value: 'light', label: 'Light' },
@@ -233,10 +239,20 @@
 
 <AccountsDialog bind:open={showAccounts} {installed} />
 
-<dialog class="upd" bind:this={updDlg} aria-labelledby="upd-title">
+<dialog
+  class="upd"
+  bind:this={updDlg}
+  aria-labelledby="upd-title"
+  oncancel={(e) => updating && e.preventDefault()}
+  onclose={() => !updating && snoozeUpdate()}
+>
   {#if updater.available}
-    <h2 id="upd-title">Update Wren to {updater.available.version}?</h2>
+    <h2 id="upd-title">Wren {updater.available.version} is available</h2>
     <p>You have {updater.current}. Wren downloads the update, installs it and restarts.</p>
+    {#if notes}
+      <h3 class="wn">What's new</h3>
+      <div class="notes md">{@html renderMarkdown(notes)}</div>
+    {/if}
     <p class="muted">Your accounts and conversations stay. Replies still running in a pane are stopped by the restart.</p>
     {#if updater.phase === 'error'}<p class="err" role="alert">The update didn't work: {updater.error}</p>{/if}
     <div class="row">
@@ -291,7 +307,7 @@
     border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
   }
   .upd {
-    width: min(420px, calc(100vw - 40px));
+    width: min(480px, calc(100vw - 40px));
     border: 1px solid var(--border); border-radius: 14px;
     background: var(--surface); color: var(--text); padding: 18px 20px;
   }
@@ -301,6 +317,15 @@
   .upd .muted { color: var(--muted); }
   .upd .err { color: var(--danger); }
   .upd .row { display: flex; gap: 8px; margin-top: 12px; }
+  .upd .wn { margin: 12px 0 6px; font-size: 13px; font-weight: 600; }
+  .upd .notes {
+    max-height: 40vh; overflow: auto; margin-bottom: 8px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+    padding: 8px 12px; font-size: 13px; line-height: 1.5;
+  }
+  .upd .notes :global(ul) { margin: 4px 0; padding-left: 18px; }
+  .upd .notes :global(li + li) { margin-top: 4px; }
+  .upd .notes :global(p) { margin: 4px 0; }
   .upd .primary:disabled { opacity: 0.7; cursor: default; }
   .grid {
     flex: 1;

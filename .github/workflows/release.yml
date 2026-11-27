@@ -79,6 +79,23 @@ jobs:
       - name: Install frontend packages
         run: npm ci
 
+      # "What's new" for this version, from CHANGELOG.md (the "## <version>"
+      # section). Wren shows it in its update window.
+      - name: Read what's new
+        id: notes
+        shell: bash
+        run: |
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          section=$(awk -v v="## $version" '$0 == v {on=1; next} /^## / {on=0} on' CHANGELOG.md | sed -e '/./,$!d')
+          if [ -z "$section" ]; then
+            echo "::warning::CHANGELOG.md has no '## $version' section; the update window shows no what's new."
+          fi
+          {
+            echo 'whatsnew<<WREN_NOTES_END'
+            echo "$section"
+            echo 'WREN_NOTES_END'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and upload to the draft release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -91,6 +108,11 @@ jobs:
           tagName: v__VERSION__ # replaced with the version in tauri.conf.json
           releaseName: 'Wren v__VERSION__'
           releaseBody: |
+            ## What's new
+            ${{ steps.notes.outputs.whatsnew }}
+
+            ---
+
             Download the file for your computer:
             - **macOS (Apple Silicon, M1 and newer):** `Wren_*_aarch64.dmg`
             - **macOS (Intel):** `Wren_*_x64.dmg`
