@@ -29,7 +29,7 @@
   ];
 
   const NOTIFY_KINDS = [
-    { key: 'approval', label: 'Needs your approval', hint: 'Allow / Deny, a plan ready to start, an action Antigravity refused' },
+    { key: 'approval', label: 'Needs your approval', hint: 'Allow / Deny, a plan ready to start, an action Antigravity refused, a pane paused for 10 minutes' },
     { key: 'question', label: 'Asks you a question', hint: 'A question form is waiting for your choices' },
     { key: 'done', label: 'Task done', hint: 'With the first line of the answer' },
     { key: 'problems', label: 'Problems', hint: 'A task stopped with an error or ran out of usage' },

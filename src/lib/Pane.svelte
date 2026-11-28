@@ -36,6 +36,7 @@
     onconv,
     closable = false,
     onclose,
+    onwork,
   }: {
     paneId: string;
     index: number;
@@ -51,6 +52,8 @@
     closable?: boolean;
     /** Removes this pane from the window. */
     onclose?: () => void;
+    /** Tells the window whether this pane works / is paused (for "Pause all"). */
+    onwork?: (busy: boolean, paused: boolean) => void;
   } = $props();
 
   let messages = $state<Msg[]>([]);
@@ -310,6 +313,99 @@
   /** Stop was pressed: late lines from the stopped CLI don't make the pane work again. */
   let stopped = false;
 
+  // ---- Pause / Resume: the CLI and its commands are frozen where they are ----
+  let paused = $state(false);
+  /** When the current pause started (ms). */
+  let pausedAt = $state(0);
+  let pauseReminder: ReturnType<typeof setTimeout> | undefined;
+  /** A pause of 30 s or more happened during this task (the AI's connection may have dropped). */
+  let longPause = false;
+  /** Wren already sent "continue" once after a dropped connection (no loops). */
+  let autoContinued = false;
+  /** A message sent while paused: it goes out when the task finishes. */
+  let queued = $state<{ text: string; files: SentFile[] } | null>(null);
+
+  $effect(() => onwork?.(busy, paused));
+
+  /** The pause is over (resumed, stopped, or the process went away): the work timer goes on without the paused time. */
+  function clearPause() {
+    if (!paused) return;
+    const ms = Date.now() - pausedAt;
+    if (turnStartedAt) turnStartedAt += ms;
+    if (ms >= 30_000) longPause = true;
+    paused = false;
+    pausedAt = 0;
+    clearTimeout(pauseReminder);
+  }
+
+  /** Pause (true) or Resume (false) this pane's task. */
+  async function setPaused(want: boolean) {
+    if (want === paused || (want && !busy)) return;
+    try {
+      const ok = await invoke<boolean>('pause_pane', { paneId, paused: want });
+      if (!want) {
+        clearPause();
+        tickNow = Date.now();
+        return;
+      }
+      if (!ok || !busy) return; // the task ended meanwhile
+      paused = true;
+      pausedAt = tickNow = Date.now();
+      clearTimeout(pauseReminder);
+      pauseReminder = setTimeout(() => tell('approval', 'is still paused', 'Resume it in Wren when you are ready.'), 10 * 60_000);
+    } catch (e) {
+      push({ role: 'error', text: String(e) });
+    }
+  }
+
+  /** ⌘P / the Pause button. */
+  export function togglePause() {
+    return setPaused(!paused);
+  }
+  export function pause(want: boolean) {
+    return setPaused(want);
+  }
+
+  /** Sending while paused: the message waits for the end of the task (several are joined). */
+  function queueMessage(text: string, files: SentFile[]) {
+    queued = queued ? { text: [queued.text, text].filter(Boolean).join('\n\n'), files: [...queued.files, ...files] } : { text, files };
+  }
+
+  /** Cancel the queued message: it goes back into the message box. */
+  function unqueue() {
+    if (!queued) return;
+    const q = queued;
+    queued = null;
+    input = [q.text, input].filter((t) => t.trim()).join('\n\n');
+    attachments.push(...q.files.map((f) => ({ ...f, preview: previews[f.path] || null })));
+  }
+
+  /** Error texts that mean the connection to the AI's server broke (e.g. during a long pause). */
+  const DROPPED = /network|connection|connect|socket|timed? ?out|timeout|ECONNRESET|ETIMEDOUT|EPIPE|terminated|fetch failed|stream (was )?(closed|ended|interrupted)|aborted|disconnect/i;
+
+  /** After a long pause the AI's connection dropped: ask it once to go on with the task. */
+  function continueAfterPause(why: string | null): boolean {
+    if (!longPause || autoContinued || !lastUserText || (why && (isLimitMessage(why) || !DROPPED.test(why)))) return false;
+    autoContinued = true;
+    push({ role: 'notice', text: `The connection to ${providerLabel} dropped during the pause. Wren asked it to continue the task.` });
+    const files = lastUserFiles;
+    sendText(
+      'The connection was interrupted while the task was paused. Continue the task you were working on from where you stopped; do not start over.',
+      '(Continue after the pause)',
+      [],
+      lastUserText,
+    ).then(() => (lastUserFiles = files));
+    return true;
+  }
+
+  /** The task is over: a queued message goes out now. */
+  function sendQueued() {
+    if (!queued || busy) return;
+    const q = queued;
+    queued = null;
+    submit(q.text, q.files);
+  }
+
   /** The CLI works again although Wren thought the task was over (Claude after a background command or sub-agent finished): show it as working. */
   function resumeWorking() {
     if (busy || stopped) return;
@@ -328,6 +424,7 @@
 
   /** The turn ended (answered, failed, stopped): stop the timer and remember how long it worked. */
   function endTurn() {
+    clearPause();
     clearInterval(tickTimer);
     thinking = false;
     if (!turnStartedAt) return;
@@ -443,6 +540,7 @@
   }
 
   const verb = $derived.by(() => {
+    if (paused) return 'Paused';
     if (waitingQuestion) return 'Waiting for your answer';
     if (waitingApproval) return 'Waiting for your approval';
     if (thinking) return 'Thinking';
@@ -579,7 +677,8 @@
   }
 
   const elapsed = $derived.by(() => {
-    const s = Math.max(0, Math.floor((tickNow - turnStartedAt) / 1000));
+    // While paused: how long the pause has lasted (the work timer stands still).
+    const s = Math.max(0, Math.floor((tickNow - (paused ? pausedAt : turnStartedAt)) / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   });
 
@@ -940,6 +1039,8 @@
         break;
       }
       case 'turn_done':
+        // The CLI finished just before it was frozen: let it run again for the next message.
+        if (paused) invoke('pause_pane', { paneId, paused: false }).catch(() => {});
         busy = false;
         streamingId = null;
         checkRefusal(ev.error);
@@ -976,7 +1077,8 @@
           saveResearchReport();
         }
         if (!ev.error) showNewVisuals();
-        if (ev.error && !pendingLimit) tell('problems', 'stopped with an error', firstLine(ev.error));
+        const resumed = !!ev.error && !pendingLimit && continueAfterPause(ev.error);
+        if (ev.error && !pendingLimit && !resumed) tell('problems', 'stopped with an error', firstLine(ev.error));
         else if (!ev.error && !refusedThisTurn) tell('done', 'finished', firstLine(lastAnswer()) || 'The task is done.');
         // Codex doesn't report limits during a turn, so ask it (at most once a minute).
         // Claude normally sends them during the turn; ask only if it didn't.
@@ -987,6 +1089,8 @@
           const text = pendingLimit;
           pendingLimit = null;
           handleLimit(text);
+        } else if (!resumed) {
+          sendQueued();
         }
         break;
       case 'error':
@@ -1014,10 +1118,15 @@
         }
         if (busy) {
           busy = false;
+          if (ev.code !== 0 && ev.code !== null && continueAfterPause(null)) break;
           if (ev.code !== 0 && ev.code !== null) {
             const tail = logs.slice(-8).join('\n');
             push({ role: 'error', text: `${providerLabel} stopped (exit code ${ev.code}).${tail ? '\n\n' + tail : ''}` });
             tell('problems', 'stopped unexpectedly', `Exit code ${ev.code}.`);
+          }
+          if (queued) {
+            unqueue();
+            push({ role: 'info', text: 'Your queued message is back in the message box.' });
           }
         }
         break;
@@ -1123,6 +1232,7 @@
     stopWaiting();
     logs = [];
     thinking = false;
+    clearPause();
     clearInterval(tickTimer);
     totals = emptyTotals();
   }
@@ -1171,11 +1281,16 @@
       stopped = true;
       permissionChangedLive = false;
       busy = false;
+      clearPause();
       streamingId = null;
       expireApprovals();
       endTurn();
       revertAfterRetry();
       push({ role: 'info', text: 'Stopped. Your next message continues this conversation.' });
+      if (queued) {
+        unqueue();
+        push({ role: 'info', text: 'Your queued message is back in the message box.' });
+      }
       persist();
     } catch (e) {
       push({ role: 'error', text: String(e) });
@@ -1203,6 +1318,8 @@
   export async function openConversation(id: string) {
     try {
       if (busy) await invoke('stop_pane', { paneId });
+      clearPause();
+      queued = null;
       const conv = await getConversation(id);
       config.provider = conv.provider;
       config.accountId = conv.accountId;
@@ -1276,7 +1393,7 @@
 
   async function send() {
     const text = input.trim();
-    if ((!text && !attachments.length) || busy) return;
+    if ((!text && !attachments.length) || (busy && !paused)) return;
     if (text === '\\new') {
       input = '';
       await newConversation();
@@ -1289,11 +1406,13 @@
     input = '';
     const files: SentFile[] = attachments.map(({ preview: _p, ...f }) => f);
     attachments = [];
+    if (busy) return queueMessage(text, files);
     await submit(text, files);
   }
 
   /** A message from the message box or from a paired phone. */
   async function submit(text: string, files: SentFile[]) {
+    autoContinued = false;
     // The pane got an account since its CLI started (e.g. the first one was just added).
     if (opened && config.accountId !== appliedAccount) {
       try {
@@ -1327,6 +1446,7 @@
     }
     pendingLimit = null;
     sawLimitEvent = false;
+    longPause = false;
     push({ role: 'user', text: shownText, files: files.length ? files : undefined });
     turnStart = messages.length;
     turnSentAt = Date.now();
@@ -1418,6 +1538,9 @@
       busy,
       startedAt: turnStartedAt,
       thinking,
+      paused,
+      pausedAt,
+      queued: queued ? queued.text || `${queued.files.length} file(s)` : null,
       waitingFor: waitingQuestion ? 'question' : waitingApproval ? 'approval' : null,
       waitingLimit: waiting ? { ...waiting } : null,
       limitHit,
@@ -1439,7 +1562,11 @@
     isEmpty: () => !busy && !waiting && !messages.some((m) => m.role === 'user'),
     opened: () => openedReady,
     async send(text, files) {
-      if (busy) throw new Error('This pane is still working. Wait, or press Stop.');
+      if (busy && !paused) throw new Error('This pane is still working. Pause it to queue a message, wait, or press Stop.');
+      if (busy) {
+        if (!text && !files.length) throw new Error('Type a message first.');
+        return queueMessage(text, files);
+      }
       if (missing) throw new Error(`The ${PROVIDERS[config.provider].bin} CLI isn't installed on the computer.`);
       if (text === '\\new') return newConversation();
       if (!text && !files.length) throw new Error('Type a message first.');
@@ -1447,6 +1574,10 @@
       await submit(text, files);
     },
     stop: () => stop(),
+    async pause(want) {
+      if (want && !busy) throw new Error('This pane is not working.');
+      await setPaused(want);
+    },
     async approve(id, decision) {
       const m = cardById(id);
       if (decision === 'retry') {
@@ -1541,6 +1672,7 @@
     untrack(() => paneChanged(slot));
   });
 
+  const MOD = navigator.userAgent.includes('Mac') ? '⌘' : 'Ctrl+';
   const fmt = (n: number) => (n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
 
   onMount(async () => {
@@ -1565,6 +1697,7 @@
     unregisterPane(slot);
     clearInterval(nowTimer);
     clearInterval(tickTimer);
+    clearTimeout(pauseReminder);
     stopWaiting();
     invoke('close_pane', { paneId }).catch(() => {});
   });
@@ -1626,6 +1759,21 @@
     <span class="spacer"></span>
     {#if reportedModel}<span class="model" title={`Model reported by the CLI: ${reportedModel}`}>{modelName(modelList, reportedModel)}</span>{/if}
     {#if busy}
+      <button
+        class="ghost pausebtn"
+        class:on={paused}
+        onclick={togglePause}
+        aria-pressed={paused}
+        title={paused ? `Resume the task (${MOD}P)` : `Pause the task: ${providerLabel} and its commands freeze where they are (${MOD}P; ${MOD}⇧P for all panes)`}
+      >
+        {#if paused}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z" /></svg>
+          <span>Resume</span>
+        {:else}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></svg>
+          <span>Pause</span>
+        {/if}
+      </button>
       <button class="ghost" onclick={stop} title="Stop the current task">Stop</button>
     {/if}
     <button
@@ -1649,7 +1797,7 @@
   {#if confirmClose}
     <div class="banner limit" role="alertdialog" aria-label="Close this pane?">
       <span>
-        {busy ? (waitingApproval ? 'This conversation is waiting for your approval.' : 'This conversation is still working.') : 'Wren is waiting to continue this conversation.'}
+        {busy ? (paused ? 'This conversation is paused.' : waitingApproval ? 'This conversation is waiting for your approval.' : 'This conversation is still working.') : 'Wren is waiting to continue this conversation.'}
         Stop it and close the pane? It stays in the sidebar.
       </span>
       <button class="ghost" onclick={stopAndClose}>Stop &amp; close</button>
@@ -1742,8 +1890,8 @@
         <div class="steps" class:live={it.live}>
           <button class="shead" aria-expanded={open} onclick={() => (openTurns[it.key] = !open)}>
             {#if it.live}
-              <PeckingWren size={18} />
-              <span class="verb">{verb}</span>
+              <PeckingWren size={18} still={paused} />
+              <span class="verb" class:pausedverb={paused}>{verb}</span>
               <span class="stime">{elapsed}</span>
             {:else}
               <span class="verb done">{it.durationMs !== undefined ? `Worked for ${fmtDuration(it.durationMs)}` : `${it.steps.length} step${it.steps.length === 1 ? '' : 's'}`}</span>
@@ -1759,7 +1907,7 @@
                     <summary>
                       <span class="slabel">{sl.label}</span>
                       {#if sl.subject}<span class="ssubject">{sl.subject}</span>{/if}
-                      {#if m.result === undefined && it.live}<span class="sstate">running</span>{:else if m.isError}<span class="sstate bad">failed</span>{/if}
+                      {#if m.result === undefined && it.live}<span class="sstate">{paused ? 'paused' : 'running'}</span>{:else if m.isError}<span class="sstate bad">failed</span>{/if}
                       <svg class="schev" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
                     </summary>
                     <div class="sbody">
@@ -1905,6 +2053,14 @@
   {/snippet}
 
   <footer class="composer">
+    {#if queued}
+      <div class="queued" role="status">
+        <span class="qtag">Queued</span>
+        <span class="qtext" title={queued.text}>{queued.text || `${queued.files.length} file${queued.files.length === 1 ? '' : 's'}`}{queued.text && queued.files.length ? ` · ${queued.files.length} file${queued.files.length === 1 ? '' : 's'}` : ''}</span>
+        <span class="qhint">{paused ? 'sent when the task finishes after Resume' : 'sent when the task finishes'}</span>
+        <button class="ghost" onclick={unqueue} title="Put it back into the message box">Edit</button>
+      </div>
+    {/if}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="inputbox"
@@ -1940,7 +2096,7 @@
         bind:value={input}
         onkeydown={onKey}
         onpaste={onPaste}
-        placeholder={busy ? 'Working…' : config.mode === 'research' ? `Research question for ${providerLabel}` : config.mode === 'study' ? `What do you want to learn? (${providerLabel})` : `Message ${providerLabel}`}
+        placeholder={paused ? 'Paused. Messages you send now are queued until the task finishes.' : busy ? 'Working…' : config.mode === 'research' ? `Research question for ${providerLabel}` : config.mode === 'study' ? `What do you want to learn? (${providerLabel})` : `Message ${providerLabel}`}
         disabled={missing}
       ></textarea>
       <div class="tools">
@@ -1959,7 +2115,7 @@
           onchange={changeModel}
         />
         <span class="spacer"></span>
-        <button class="send" onclick={send} disabled={busy || (!input.trim() && !attachments.length) || missing} aria-label="Send">
+        <button class="send" onclick={send} disabled={(busy && !paused) || (!input.trim() && !attachments.length) || missing} aria-label={paused ? 'Queue message' : 'Send'} title={paused ? 'Queue: sent when the task finishes' : undefined}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
         </button>
       </div>
@@ -2057,6 +2213,14 @@
   .vsplit { flex: 0 0 6px; margin: 0 -3px; cursor: col-resize; z-index: 1; position: relative; }
   .vsplit:hover, .vsplit:focus-visible { background: color-mix(in oklab, var(--accent-fill) 40%, transparent); outline: none; }
   .browserbtn { display: inline-flex; align-items: center; gap: 5px; }
+  .pausebtn { display: inline-flex; align-items: center; gap: 5px; }
+  .pausebtn.on { color: var(--accent); border-color: var(--accent); }
+  .shead .verb.pausedverb { color: var(--accent); }
+  .queued { max-width: 64rem; margin: 0 auto 6px; display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 10px; border: 1px dashed var(--border); border-radius: 8px; font-size: 12px; color: var(--muted); }
+  .queued .qtag { flex-shrink: 0; font-weight: 600; color: var(--accent); }
+  .queued .qtext { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .queued .qhint { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queued button { padding: 2px 8px; font-size: 12px; }
   .browserbtn.on { color: var(--accent); border-color: var(--accent); }
   .visual { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px 8px 12px; background: var(--surface-2); font-size: 13px; }
   .visual svg { color: var(--accent); flex-shrink: 0; }

@@ -27,6 +27,12 @@ export interface PhonePaneMeta {
   /** ms, when the current task started (0 = not working). */
   startedAt: number;
   thinking: boolean;
+  /** Paused on the computer or the phone (frozen until Resume). */
+  paused?: boolean;
+  /** ms, when the pause started. */
+  pausedAt?: number;
+  /** A message waiting to be sent when the task finishes. */
+  queued?: string | null;
   waitingFor: 'approval' | 'question' | null;
   /** Waiting for a usage reset before continuing by itself. */
   waitingLimit: { until: number; known: boolean } | null;
@@ -149,6 +155,7 @@ export type PhoneRequest =
   | { op: 'watch'; slot: number | null }
   | { op: 'send'; slot: number; text: string; files?: Uploaded[] }
   | { op: 'stop'; slot: number }
+  | { op: 'pause'; slot: number; paused: boolean }
   | { op: 'approve'; slot: number; msg: number; decision: 'allow' | 'allow_session' | 'deny' | 'retry' | 'keep' }
   | { op: 'answer'; slot: number; msg: number; answers: Record<string, string[]> | null }
   | { op: 'new_chat'; slot: number }

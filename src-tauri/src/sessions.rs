@@ -64,6 +64,8 @@ struct Running {
     stdin_tx: Option<mpsc::UnboundedSender<String>>,
     kill_tx: Option<oneshot::Sender<()>>,
     alive: Arc<AtomicBool>,
+    /// Frozen by Pause (the CLI and its commands get no CPU until Resume).
+    paused: bool,
 }
 
 struct Session {
@@ -388,6 +390,20 @@ impl Manager {
         Ok(())
     }
 
+    /// Pause: freeze the CLI and everything it started, exactly where they
+    /// are; Resume lets them go on. Returns false when nothing is running.
+    pub fn pause(&self, pane_id: &str, paused: bool) -> Result<bool, String> {
+        let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
+        let s = map.get_mut(pane_id).ok_or("unknown pane")?;
+        let running = s.is_running();
+        let Some(r) = s.run.as_mut().filter(|_| running) else { return Ok(false) };
+        if r.paused != paused {
+            freeze_tree(r.pid, paused);
+            r.paused = paused;
+        }
+        Ok(true)
+    }
+
     pub fn close(&self, pane_id: &str) -> Result<(), String> {
         let mut map = self.sessions.lock().map_err(|e| e.to_string())?;
         if let Some(mut s) = map.remove(pane_id) {
@@ -548,7 +564,7 @@ fn spawn(s: &mut Session) -> Result<(), String> {
         }
     });
 
-    s.run = Some(Running { pid, stdin_tx, kill_tx: Some(kill_tx), alive });
+    s.run = Some(Running { pid, stdin_tx, kill_tx: Some(kill_tx), alive, paused: false });
     Ok(())
 }
 
@@ -558,6 +574,8 @@ fn kill_tree(pid: Option<u32>) {
     #[cfg(unix)]
     unsafe {
         libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+        // A paused (stopped) process only receives the SIGTERM once it runs again.
+        libc::killpg(pid as libc::pid_t, libc::SIGCONT);
     }
     #[cfg(windows)]
     {
@@ -566,6 +584,99 @@ fn kill_tree(pid: Option<u32>) {
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .creation_flags(0x0800_0000)
             .status();
+    }
+}
+
+/// Pause / Resume the CLI and the commands it started. Unix: the whole
+/// process group (like Ctrl+Z in a terminal). Windows: every process in the
+/// tree is suspended / resumed.
+fn freeze_tree(pid: Option<u32>, stop: bool) {
+    let Some(pid) = pid else { return };
+    #[cfg(unix)]
+    unsafe {
+        libc::killpg(pid as libc::pid_t, if stop { libc::SIGSTOP } else { libc::SIGCONT });
+    }
+    #[cfg(windows)]
+    win_freeze::tree(pid, stop);
+}
+
+#[cfg(windows)]
+mod win_freeze {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage: u32,
+        pid: u32,
+        heap_id: usize,
+        module_id: u32,
+        threads: u32,
+        parent: u32,
+        pri_class_base: i32,
+        flags: u32,
+        exe: [u16; 260],
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
+        fn Process32FirstW(snap: *mut c_void, e: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snap: *mut c_void, e: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn CloseHandle(h: *mut c_void) -> i32;
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSuspendProcess(h: *mut c_void) -> i32;
+        fn NtResumeProcess(h: *mut c_void) -> i32;
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x2;
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+
+    pub fn tree(root: u32, stop: bool) {
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap.is_null() || snap as isize == -1 {
+                return;
+            }
+            let mut e: ProcessEntry32W = std::mem::zeroed();
+            e.size = std::mem::size_of::<ProcessEntry32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                pairs.push((e.pid, e.parent));
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+        }
+        // The CLI first (so it can't start new commands), then its children.
+        let mut tree = vec![root];
+        let mut i = 0;
+        while i < tree.len() {
+            let p = tree[i];
+            for &(c, parent) in &pairs {
+                if parent == p && c != p && !tree.contains(&c) {
+                    tree.push(c);
+                }
+            }
+            i += 1;
+        }
+        for pid in tree {
+            unsafe {
+                let h = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+                if h.is_null() {
+                    continue;
+                }
+                if stop {
+                    NtSuspendProcess(h);
+                } else {
+                    NtResumeProcess(h);
+                }
+                CloseHandle(h);
+            }
+        }
     }
 }
 
@@ -655,6 +766,45 @@ pub fn detect_clis() -> HashMap<Provider, Option<String>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Process state letter from ps ("S" sleeping, "T" stopped), or None when gone.
+    #[cfg(unix)]
+    fn ps_state(pid: u32) -> Option<char> {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().chars().next()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pause_freezes_the_cli_and_its_commands() {
+        use std::os::unix::process::CommandExt;
+        // A "CLI" that started a command of its own, like Claude running Bash.
+        let mut cli = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(cli.stdout.take().unwrap()), &mut line).unwrap();
+        let child: u32 = line.trim().parse().unwrap();
+        let pid = cli.id();
+        let wait = |want: char, p: u32| (0..50).any(|_| ps_state(p) == Some(want) || { std::thread::sleep(std::time::Duration::from_millis(40)); false });
+
+        freeze_tree(Some(pid), true);
+        assert!(wait('T', pid), "the CLI is stopped");
+        assert!(wait('T', child), "its command is stopped too");
+        freeze_tree(Some(pid), false);
+        assert!(wait('S', child), "the command runs again");
+
+        // Stop while paused still ends everything.
+        freeze_tree(Some(pid), true);
+        assert!(wait('T', child));
+        kill_tree(Some(pid));
+        let status = cli.wait().unwrap();
+        assert!(!status.success());
+        assert!((0..50).any(|_| matches!(ps_state(child), None | Some('Z')) || { std::thread::sleep(std::time::Duration::from_millis(40)); false }), "the command ended");
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
     use tauri::ipc::InvokeResponseBody;
@@ -1230,6 +1380,54 @@ mod tests {
         let second = e.iter().position(|s| s.contains("turn_started")).unwrap();
         let later = e.iter().skip(second + 1).position(|s| s.contains("turn_started")).unwrap() + second + 1;
         assert!(e[later..].iter().any(|s| s.contains("Background job finished")), "{e:?}");
+        m.kill_all();
+    }
+
+    /// The real Claude Code against a fake API (WREN_FAKE_API6=<url>) that answers
+    /// "PAUSE please" with Bash `sleep 3 && echo slept > out.txt`. Pausing during
+    /// the command freezes it (no file after 6 s); after Resume it finishes and
+    /// the turn ends normally.
+    #[test]
+    fn real_claude_pause_freezes_its_command() {
+        let Ok(api) = std::env::var("WREN_FAKE_API6") else { return };
+        let dir = std::env::temp_dir().join(format!("wren-real-pause-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (events, channel) = collector();
+        let m = Manager::default();
+        let cfg = PaneConfig {
+            provider: Provider::Claude,
+            cwd: dir.to_string_lossy().to_string(),
+            permission: Permission::Full,
+            account_id: None,
+            model: Some("haiku".into()),
+            effort: None,
+            mode: None,
+            github_account_id: None,
+            ai_browser: false,
+            codex_private: false,
+        };
+        let env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), api),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), dir.join("cfg").to_string_lossy().to_string()),
+        ];
+        let out = dir.join("out.txt");
+        tauri::async_runtime::block_on(async {
+            m.open("p".into(), cfg, Ok(env), channel).unwrap();
+            m.send("p", "PAUSE please".into(), vec![]).unwrap();
+            wait_for(&events, "\"kind\":\"tool_use\"", 1);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(m.pause("p", true).unwrap());
+            std::thread::sleep(Duration::from_secs(6));
+            assert!(!out.exists(), "the command ran while paused");
+            assert!(!events.lock().unwrap().iter().any(|e| e.contains("turn_done")));
+            assert!(m.pause("p", false).unwrap());
+            wait_for(&events, "turn_done", 1);
+        });
+        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "slept");
+        let e = events.lock().unwrap();
+        assert!(e.iter().any(|s| s.contains("Done after the pause.")), "{e:?}");
+        assert!(!e.iter().any(|s| s.contains("\"error\":\"")), "{e:?}");
         m.kill_all();
     }
 

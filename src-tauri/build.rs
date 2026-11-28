@@ -42,6 +42,7 @@ const COMMANDS: &[&str] = &[
     "usage_records",
     "new_conversation",
     "stop_pane",
+    "pause_pane",
     "close_pane",
     "detect_clis",
     "default_folder",

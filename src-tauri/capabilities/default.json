@@ -50,6 +50,7 @@
     "allow-usage-records",
     "allow-new-conversation",
     "allow-stop-pane",
+    "allow-pause-pane",
     "allow-close-pane",
     "allow-detect-clis",
     "allow-default-folder",

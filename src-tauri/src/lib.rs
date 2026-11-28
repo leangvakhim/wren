@@ -435,6 +435,12 @@ fn stop_pane(state: State<'_, Manager>, pane_id: String) -> Result<(), String> {
     state.stop(&pane_id)
 }
 
+/// Freeze (`paused` = true) or unfreeze the pane's CLI and every command it started.
+#[tauri::command]
+fn pause_pane(state: State<'_, Manager>, pane_id: String, paused: bool) -> Result<bool, String> {
+    state.pause(&pane_id, paused)
+}
+
 #[tauri::command]
 fn close_pane(state: State<'_, Manager>, pane_id: String) -> Result<(), String> {
     state.close(&pane_id)
@@ -789,6 +795,7 @@ pub fn run() {
             usage_records,
             new_conversation,
             stop_pane,
+            pause_pane,
             close_pane,
             detect_clis,
             default_folder,

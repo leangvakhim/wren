@@ -55,6 +55,8 @@ export interface PaneRemote {
   opened(): Promise<void>;
   send(text: string, files: SentFile[]): Promise<void>;
   stop(): Promise<void>;
+  /** Pause (true) / Resume (false) the task. */
+  pause(paused: boolean): Promise<void>;
   approve(msgId: number, decision: 'allow' | 'allow_session' | 'deny' | 'retry' | 'keep'): Promise<void>;
   answer(msgId: number, answers: Record<string, string[]> | null): Promise<void>;
   newChat(): Promise<void>;
@@ -260,6 +262,8 @@ async function run(conn: number, c: Conn, r: PhoneRequest): Promise<unknown> {
       return pane(r.slot).send(String(r.text ?? ''), asSent(r.files));
     case 'stop':
       return pane(r.slot).stop();
+    case 'pause':
+      return pane(r.slot).pause(!!r.paused);
     case 'approve':
       return pane(r.slot).approve(r.msg, r.decision);
     case 'answer':

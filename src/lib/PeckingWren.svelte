@@ -1,10 +1,10 @@
 <script lang="ts">
   // The Perch wren, tipping forward from its feet to peck at crumbs (loading).
-  // Holds still when the system asks for reduced motion.
-  let { size = 18, color = 'var(--accent-fill)', hole = 'var(--surface)' }: { size?: number; color?: string; hole?: string } = $props();
+  // Holds still when the system asks for reduced motion, or when `still` (a paused task).
+  let { size = 18, color = 'var(--accent-fill)', hole = 'var(--surface)', still = false }: { size?: number; color?: string; hole?: string; still?: boolean } = $props();
 </script>
 
-<svg class="peck" width={size * 1.2} height={size} viewBox="0 0 120 100" aria-hidden="true">
+<svg class="peck" class:still width={size * 1.2} height={size} viewBox="0 0 120 100" aria-hidden="true">
   <g class="crumbs" fill="var(--muted)">
     <circle cx="101" cy="86" r="2.6" />
     <circle cx="108" cy="87.5" r="2" />
@@ -48,6 +48,7 @@
     40%, 60% { opacity: 0.55; }
     80%, 100% { opacity: 1; }
   }
+  .still .bird, .still .crumbs { animation: none; }
   @media (prefers-reduced-motion: reduce) {
     .bird, .crumbs { animation: none; }
   }

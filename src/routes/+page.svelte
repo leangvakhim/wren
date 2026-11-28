@@ -66,6 +66,8 @@
   let panes = $state<(Pane | undefined)[]>([]);
   // Which saved conversation each slot is showing.
   let paneConv = $state<(string | null)[]>([null, null, null, null]);
+  // Which slots are working / paused (for "Pause all").
+  let work = $state([0, 1, 2, 3].map(() => ({ busy: false, paused: false })));
 
   $effect(() => {
     applyTheme(theme);
@@ -83,6 +85,26 @@
 
   const visible = $derived(order.slice(0, layout));
   const activeSlot = $derived(visible[activePane] ?? visible[0]);
+
+  const busySlots = $derived(visible.filter((s) => work[s].busy));
+  const allPaused = $derived(busySlots.length > 0 && busySlots.every((s) => work[s].paused));
+
+  /** Pause every working pane, or (when all are paused) resume them all. */
+  function pauseAll() {
+    const want = !allPaused;
+    for (const s of busySlots) panes[s]?.pause(want);
+  }
+
+  const MAC = navigator.userAgent.includes('Mac');
+  const MOD = MAC ? '⌘' : 'Ctrl+';
+
+  /** ⌘P pauses / resumes the active pane, ⌘⇧P all panes (Ctrl on Windows / Linux). */
+  function onWindowKey(e: KeyboardEvent) {
+    if (e.code !== 'KeyP' || e.altKey || !(MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) return;
+    e.preventDefault();
+    if (e.shiftKey) pauseAll();
+    else panes[activeSlot]?.togglePause();
+  }
 
   /** × on a pane: remove it; the panes after it move over (2 columns → 1 pane, etc.). */
   function closePane(pos: number) {
@@ -180,6 +202,8 @@
   ];
 </script>
 
+<svelte:window onkeydown={onWindowKey} />
+
 <div class="app">
   <header class="top">
     <button
@@ -214,6 +238,18 @@
     </div>
 
     <span class="spacer"></span>
+
+    {#if layout > 1 && busySlots.length}
+      <button class="ghost pauseall" class:on={allPaused} onclick={pauseAll} aria-pressed={allPaused} title={allPaused ? `Resume every paused pane (${MOD}⇧P)` : `Pause every working pane (${MOD}⇧P)`}>
+        {#if allPaused}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z" /></svg>
+          Resume all
+        {:else}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></svg>
+          Pause all
+        {/if}
+      </button>
+    {/if}
 
     {#if updater.available}
       <button class="update" onclick={() => updDlg?.showModal()} title={`Wren ${updater.available.version} is available (you have ${updater.current})`}>
@@ -279,6 +315,7 @@
         onopenaccounts={() => (showAccounts = true)}
         onconv={(id) => (paneConv[slot] = id)}
         onclose={() => closePane(i)}
+        onwork={(busy, paused) => (work[slot] = { busy, paused })}
       />
     {/each}
     {/if}
@@ -367,6 +404,8 @@
   .seg button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
   .body { flex: 1; min-height: 0; display: flex; }
   .iconbtn { padding: 4px 7px; }
+  .pauseall { display: inline-flex; align-items: center; gap: 6px; }
+  .pauseall.on { color: var(--accent); border-color: var(--accent); }
   .live { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; margin-left: 2px; }
   .update {
     display: inline-flex; align-items: center; gap: 6px;

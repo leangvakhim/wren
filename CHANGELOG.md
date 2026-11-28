@@ -5,6 +5,26 @@ for the version being released to the top of the GitHub release notes, and
 Wren shows it in the update window ("What's new"). Add a section before
 tagging a new version.
 
+## 0.2.3
+
+- **Pause and Resume**: a **Pause** button next to Stop freezes the AI and
+  every command it started (tests, installs…) exactly where they are.
+  **Resume** goes on from the same spot. While paused the bird stands still
+  and the header shows how long the pause has lasted; "Worked for…" doesn't
+  count the paused time.
+- **Shortcuts**: ⌘P pauses / resumes the pane you're in, ⌘⇧P all panes
+  (Ctrl+P / Ctrl+Shift+P on Windows and Linux). With several panes working,
+  **Pause all / Resume all** appears in the top bar.
+- **Write while paused**: messages you send during a pause are **queued**
+  and go out when the task finishes. **Edit** puts a queued message back in
+  the message box.
+- **Long pauses**: there is no time limit. If the AI's connection drops
+  during a long pause, Wren asks it once to continue the task. A
+  notification reminds you after 10 minutes paused (when Wren is in the
+  back).
+- **From your phone**: Pause / Resume in the phone chat too, and messages
+  sent there during a pause are queued the same way.
+
 ## 0.2.2
 
 - **See the code behind a page**: the browser panel now has **Preview | Code**

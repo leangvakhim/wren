@@ -31,10 +31,13 @@
   const timer = setInterval(() => (now = Date.now()), 1000);
   onDestroy(() => clearInterval(timer));
   const elapsed = $derived.by(() => {
-    const s = meta?.startedAt ? Math.max(0, Math.floor((now - meta.startedAt) / 1000)) : 0;
+    // While paused: how long the pause has lasted.
+    const from = meta?.paused && meta.pausedAt ? meta.pausedAt : meta?.startedAt;
+    const s = from ? Math.max(0, Math.floor((now - from) / 1000)) : 0;
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   });
   const verb = $derived.by(() => {
+    if (meta?.paused) return 'Paused';
     if (meta?.waitingFor === 'question') return 'Waiting for your answer';
     if (meta?.waitingFor === 'approval') return 'Waiting for your approval';
     if (meta?.thinking) return 'Thinking';
@@ -165,6 +168,7 @@
       <small class="ellipsis">{label}{meta.modelLabel ? ` · ${meta.modelLabel}` : ''} · {folderOf(meta.cwd) || 'no folder'}</small>
     </div>
     {#if meta.busy}
+      <button class="ghost" class:on={meta.paused} onclick={() => act({ op: 'pause', slot, paused: !meta?.paused })} aria-pressed={!!meta.paused}>{meta.paused ? 'Resume' : 'Pause'}</button>
       <button class="ghost" onclick={() => act({ op: 'stop', slot })}>Stop</button>
     {/if}
     <button class="ghost icon" onclick={() => (menu = !menu)} aria-label="More" aria-expanded={menu}>
@@ -238,6 +242,9 @@
         {/each}
       </div>
     {/if}
+    {#if meta.queued}
+      <p class="queued"><b>Queued</b> <span class="ellipsis">{meta.queued}</span> <small>sent when the task finishes</small></p>
+    {/if}
     <div class="inrow">
       <label class="attach" aria-label="Attach photos or files">
         <input type="file" multiple onchange={pickFiles} />
@@ -248,11 +255,11 @@
         bind:value={input}
         use:grow
         onkeydown={onKey}
-        placeholder={meta.busy ? 'Working…' : `Message ${label}`}
-        disabled={meta.busy}
+        placeholder={meta.paused ? 'Paused · messages wait until the task finishes' : meta.busy ? 'Working…' : `Message ${label}`}
+        disabled={meta.busy && !meta.paused}
         aria-label="Message"
       ></textarea>
-      <button class="send" aria-label="Send" disabled={meta.busy || sending || uploading || (!input.trim() && !files.some((f) => f.done))} onclick={send}>
+      <button class="send" aria-label="Send" disabled={(meta.busy && !meta.paused) || sending || uploading || (!input.trim() && !files.some((f) => f.done))} onclick={send}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
       </button>
     </div>
@@ -269,7 +276,7 @@
     <div class="steps" class:live={it.live}>
       <button class="shead" aria-expanded={open} onclick={() => (openTurns[it.key] = !open)}>
         {#if it.live}
-          <PeckingWren size={18} hole="var(--bg)" />
+          <PeckingWren size={18} hole="var(--bg)" still={!!meta?.paused} />
           <span>{verb}</span><span class="muted">{elapsed}</span>
         {:else}
           <span>{it.durationMs !== undefined ? `Worked for ${fmtDuration(it.durationMs)}` : `${it.steps.length} step${it.steps.length === 1 ? '' : 's'}`}</span>

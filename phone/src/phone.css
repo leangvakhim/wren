@@ -145,3 +145,8 @@ h3 { font-size: 15px; margin: 18px 0 8px; }
 @media (min-width: 720px) {
   .app { max-width: 720px; margin: 0 auto; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 }
+.ghost.on { color: var(--accent); border-color: var(--accent); }
+.queued { display: flex; align-items: baseline; gap: 6px; margin: 0 0 6px; padding: 6px 10px; border: 1px dashed var(--border); border-radius: 10px; font-size: 13px; }
+.queued b { color: var(--accent); flex-shrink: 0; }
+.queued span { flex: 1; min-width: 0; }
+.queued small { color: var(--muted); flex-shrink: 0; }
