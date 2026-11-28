@@ -5,6 +5,20 @@ for the version being released to the top of the GitHub release notes, and
 Wren shows it in the update window ("What's new"). Add a section before
 tagging a new version.
 
+## 0.2.2
+
+- **See the code behind a page**: the browser panel now has **Preview | Code**
+  tabs. Code shows the whole file of the page you're looking at (for
+  example a Visualize animation) with colors and line numbers.
+- **Copy, Save as… and Show in Finder** above the code. Wrap turns long
+  lines on or off.
+- **Edit and re-run**: change the code of a page from your project right in
+  the Code tab. Wren saves it about a second after you stop typing and the
+  preview reloads. If the AI rewrites the file, the new version appears
+  there.
+- **Web pages too**: for internet pages the Code tab shows their HTML
+  source (read-only, fetched again without your cookies).
+
 ## 0.2.1
 
 - **Many more folder icons**: the icon picker now has 2,148 built-in icons

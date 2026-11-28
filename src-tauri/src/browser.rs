@@ -318,6 +318,181 @@ async fn serve(mut stream: TcpStream, roots: Arc<Mutex<HashMap<String, PathBuf>>
     let _ = stream.flush().await;
 }
 
+// ---------------- page source (the panel's Code tab) ----------------
+
+/// Largest source the Code tab shows or saves.
+pub const MAX_SOURCE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Local files the Code tab may change (text the page uses, never programs or pictures).
+const EDITABLE_EXTS: &[&str] = &["html", "htm", "svg", "css", "js", "mjs", "json", "txt", "md", "csv"];
+
+/// What the panel's Code tab shows.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Source {
+    /// "file" = a page from your project (served by Wren), "web" = a copy of
+    /// an internet page's HTML, fetched again without your cookies.
+    pub kind: &'static str,
+    pub name: String,
+    /// The local file (kind "file" only).
+    pub path: Option<String>,
+    /// None = the file hasn't changed since `known_mtime`.
+    pub text: Option<String>,
+    /// Last change of the local file in ms (0 for web pages).
+    pub mtime: u64,
+    pub editable: bool,
+    /// Why it's read-only or incomplete, if it is.
+    pub note: Option<String>,
+}
+
+fn mtime_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn editable_ext(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    EDITABLE_EXTS.contains(&ext.as_str())
+}
+
+impl Visuals {
+    /// The local file behind an address of this server, or None if the
+    /// address is anything else.
+    pub fn file_for(&self, address: &str) -> Option<PathBuf> {
+        let url = Url::parse(address).ok()?;
+        let port = (*self.port.lock().ok()?)?;
+        if url.scheme() != "http" || url.host_str() != Some("127.0.0.1") || url.port() != Some(port) {
+            return None;
+        }
+        let roots = self.roots.lock().ok()?.clone();
+        resolve_request(&roots, url.path())
+    }
+
+    /// The source of the page at `address`: the file itself for Wren's own
+    /// pages, otherwise a fresh copy from the web.
+    pub async fn source(&self, address: &str, known_mtime: Option<u64>, dev: Option<&Url>) -> Result<Source, String> {
+        let Some(file) = self.file_for(address) else {
+            return fetch_source(address, dev).await;
+        };
+        read_source(&file, known_mtime)
+    }
+
+    /// Write the Code tab's text back to the page's file. Returns the new mtime.
+    pub fn save(&self, address: &str, text: &str) -> Result<u64, String> {
+        let file = self.file_for(address).ok_or("Only pages from your project can be changed. Use Save as… for a copy.")?;
+        write_source(&file, text)
+    }
+}
+
+pub fn read_source(file: &Path, known_mtime: Option<u64>) -> Result<Source, String> {
+    let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let mtime = mtime_ms(file);
+    let base = |text, editable, note| Source { kind: "file", name: name.clone(), path: Some(file.to_string_lossy().to_string()), text, mtime, editable, note };
+    if known_mtime == Some(mtime) {
+        return Ok(base(None, editable_ext(file), None));
+    }
+    let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or_default();
+    if len as usize > MAX_SOURCE_BYTES {
+        return Ok(base(Some(String::new()), false, Some(format!("This file is too big to show here ({} MB).", len / (1024 * 1024)))));
+    }
+    let bytes = std::fs::read(file).map_err(|e| format!("Couldn't read {name}: {e}"))?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => base(Some(text), editable_ext(file), (!editable_ext(file)).then(|| "This kind of file can't be changed here.".to_string())),
+        Err(e) => base(Some(String::from_utf8_lossy(e.as_bytes()).to_string()), false, Some("This file isn't plain UTF-8 text, so it's read-only here.".into())),
+    })
+}
+
+/// Replace `file` with `text` (all at once: a crash never leaves half a file).
+pub fn write_source(file: &Path, text: &str) -> Result<u64, String> {
+    if !editable_ext(file) {
+        return Err("This kind of file can't be changed here.".into());
+    }
+    if text.len() > MAX_SOURCE_BYTES {
+        return Err("That is too much text to save (max 5 MB).".into());
+    }
+    let name = file.file_name().ok_or("Bad path")?.to_string_lossy().to_string();
+    let tmp = file.with_file_name(format!(".{name}.wren-save"));
+    std::fs::write(&tmp, text).map_err(|e| format!("Couldn't save {name}: {e}"))?;
+    if let Ok(meta) = std::fs::metadata(file) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, file).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Couldn't save {name}: {e}")
+    })?;
+    Ok(mtime_ms(file))
+}
+
+/// A web page's HTML, fetched again by Wren (no cookies, so pages that need
+/// a sign-in show their signed-out version). Same address rules as the panel.
+pub async fn fetch_source(address: &str, dev: Option<&Url>) -> Result<Source, String> {
+    let url = Url::parse(address).map_err(|_| "That isn't a web address.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Only web pages (http/https) have a source to show.".into());
+    }
+    check_url(&url, dev)?;
+    let dev = dev.cloned();
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("Mozilla/5.0 (compatible; Wren/", env!("CARGO_PKG_VERSION"), ")"))
+        .redirect(reqwest::redirect::Policy::custom(move |a| {
+            let ok = matches!(a.url().scheme(), "http" | "https") && check_url(a.url(), dev.as_ref()).is_ok();
+            if a.previous().len() > 8 || !ok { a.stop() } else { a.follow() }
+        }))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let fail = |e: String| format!("Couldn't get the page's source ({e}).");
+    let mut resp = client
+        .get(url.clone())
+        .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,*/*;q=0.8")
+        .send()
+        .await
+        .map_err(|e| fail(e.to_string()))?;
+    if resp.status().is_redirection() {
+        return Err(fail("it sends you to an address Wren doesn't open".into()));
+    }
+    if !resp.status().is_success() {
+        return Err(fail(format!("the site answered {}", resp.status())));
+    }
+    let mut bytes = Vec::new();
+    let mut cut = false;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| fail(e.to_string()))? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > MAX_SOURCE_BYTES {
+            bytes.truncate(MAX_SOURCE_BYTES);
+            cut = true;
+            break;
+        }
+    }
+    let name = url.path_segments().and_then(|mut s| s.next_back()).filter(|s| !s.is_empty()).map(String::from).unwrap_or_else(|| url.host_str().unwrap_or("page").to_string());
+    let mut note = "A web page: read-only. Wren fetched its HTML again without your cookies, so it can differ from what the page shows now.".to_string();
+    if cut {
+        note.push_str(" Only the first 5 MB are shown.");
+    }
+    Ok(Source { kind: "web", name, path: None, text: Some(String::from_utf8_lossy(&bytes).to_string()), mtime: 0, editable: false, note: Some(note) })
+}
+
+/// Show a file in Finder / Explorer / the file manager.
+pub fn reveal(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let r = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn();
+    #[cfg(windows)]
+    let r = {
+        use std::os::windows::process::CommandExt;
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(path);
+        std::process::Command::new("explorer").raw_arg(arg).creation_flags(0x0800_0000).spawn()
+    };
+    r.map(|_| ()).map_err(|e| format!("Couldn't open the folder: {e}"))
+}
+
 /// The newest pages in `<cwd>/visuals` changed at or after `since_ms`.
 pub fn recent_visuals(cwd: &str, since_ms: u64) -> Vec<String> {
     let dir = Path::new(cwd).join(VISUALS_DIR);
@@ -355,7 +530,7 @@ fn label_for(pane_id: &str) -> Result<String, String> {
 }
 
 /// Wren's dev-server address (debug builds only), never allowed in the panel.
-fn dev_url(app: &AppHandle) -> Option<Url> {
+pub fn dev_url(app: &AppHandle) -> Option<Url> {
     if cfg!(debug_assertions) {
         app.config().build.dev_url.clone()
     } else {
@@ -636,6 +811,68 @@ mod tests {
         assert!(resolve_request(&roots, "/other/a%20b.html").is_none());
         assert!(resolve_request(&roots, "/tok/missing.html").is_none());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn the_code_tab_reads_and_saves_only_served_files() {
+        let tmp = std::env::temp_dir().join(format!("wren-src-{}", random_token()));
+        let vis = tmp.join("visuals");
+        std::fs::create_dir_all(&vis).unwrap();
+        std::fs::write(vis.join("demo.html"), "<h1>one</h1>").unwrap();
+        std::fs::write(vis.join("pic.png"), b"\x89PNG").unwrap();
+        std::fs::write(tmp.join("secret.html"), "s").unwrap();
+        let v = Visuals::default();
+        let url = v.url_for(&tmp.to_string_lossy(), "visuals/demo.html").await.unwrap();
+        let src = v.source(&url, None, None).await.unwrap();
+        assert_eq!((src.kind, src.text.as_deref(), src.editable), ("file", Some("<h1>one</h1>"), true));
+        // unchanged -> no text
+        assert!(v.source(&url, Some(src.mtime), None).await.unwrap().text.is_none());
+        let m = v.save(&url, "<h1>two</h1>").unwrap();
+        assert_eq!(std::fs::read_to_string(vis.join("demo.html")).unwrap(), "<h1>two</h1>");
+        assert!(!vis.join(".demo.html.wren-save").exists());
+        assert_eq!(v.source(&url, Some(0), None).await.unwrap().mtime, m);
+        // pictures and files outside the served folder can't be written
+        let png = url.replace("demo.html", "pic.png");
+        assert!(!v.source(&png, None, None).await.unwrap().editable);
+        assert!(v.save(&png, "x").is_err());
+        assert!(v.save(&url.replace("demo.html", "../secret.html"), "x").is_err());
+        assert!(v.save(&url.replace("127.0.0.1", "localhost"), "x").is_err());
+        assert!(v.save("https://example.com/demo.html", "x").is_err());
+        assert_eq!(std::fs::read_to_string(tmp.join("secret.html")).unwrap(), "s");
+        // other addresses are web pages: never Wren's own or sign-in sites
+        assert!(fetch_source("tauri://localhost/", None).await.is_err());
+        assert!(fetch_source("https://claude.ai/", None).await.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn web_sources_are_fetched_with_the_panels_rules() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let reply = if head.starts_with("GET /away") {
+                    "HTTP/1.1 302 Found\r\nLocation: https://accounts.google.com/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else if head.starts_with("GET /hop") {
+                    "HTTP/1.1 302 Found\r\nLocation: /page.html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    let body = "<!doctype html><p>caf\u{e9}</p>";
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                };
+                let _ = s.write_all(reply.as_bytes()).await;
+            }
+        });
+        let src = fetch_source(&format!("http://127.0.0.1:{port}/hop"), None).await.unwrap();
+        assert_eq!((src.kind, src.editable, src.name.as_str()), ("web", false, "hop"));
+        assert_eq!(src.text.as_deref(), Some("<!doctype html><p>caf\u{e9}</p>"));
+        // a redirect to a sign-in site is not followed
+        assert!(fetch_source(&format!("http://127.0.0.1:{port}/away"), None).await.is_err());
+        // Wren's own dev server is refused
+        let dev = Url::parse(&format!("http://localhost:{port}")).unwrap();
+        assert!(fetch_source(&format!("http://127.0.0.1:{port}/"), Some(&dev)).await.is_err());
     }
 
     #[tokio::test]

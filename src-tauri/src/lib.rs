@@ -172,6 +172,41 @@ async fn browser_close(app: tauri::AppHandle, panels: State<'_, browser::Panels>
     panels.close(&app, &pane_id)
 }
 
+/// The source of the page shown in a browser panel (the Code tab).
+/// `known_mtime`: skip the text if the local file hasn't changed.
+#[tauri::command]
+async fn browser_source(app: tauri::AppHandle, visuals: State<'_, browser::Visuals>, url: String, known_mtime: Option<u64>) -> Result<browser::Source, String> {
+    visuals.source(&url, known_mtime, browser::dev_url(&app).as_ref()).await
+}
+
+/// Save the Code tab's text to the page's file (pages from your project only).
+#[tauri::command]
+fn browser_save_source(visuals: State<'_, browser::Visuals>, url: String, text: String) -> Result<u64, String> {
+    visuals.save(&url, &text)
+}
+
+/// Save a copy of the Code tab's text where you choose (Wren asks with the
+/// system's Save dialog; the page itself can't pick a place). None = cancelled.
+#[tauri::command]
+async fn browser_save_as(app: tauri::AppHandle, name: String, text: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_file_name(&name).save_file(move |p| {
+        let _ = tx.send(p);
+    });
+    let Some(path) = rx.await.map_err(|e| e.to_string())? else { return Ok(None) };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("Couldn't save the copy: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Show the page's file in Finder / Explorer.
+#[tauri::command]
+fn browser_reveal(visuals: State<'_, browser::Visuals>, url: String) -> Result<(), String> {
+    let file = visuals.file_for(&url).ok_or("This page isn't a file on this computer.")?;
+    browser::reveal(&file)
+}
+
 /// Open a web address in the computer's normal browser.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
@@ -731,6 +766,10 @@ pub fn run() {
             browser_place,
             browser_go,
             browser_close,
+            browser_source,
+            browser_save_source,
+            browser_save_as,
+            browser_reveal,
             open_external,
             visual_url,
             recent_visuals,
